@@ -86,7 +86,7 @@ def _run_dim_reduction(X, method, dim):
 
     return DIM_REGISTRY[method](X, dim)
 
-def dimension_reduction(data:CyESIData, 
+def dimension_reduction(data:CyESIData | np.ndarray, 
                         method:str = "pca",
                         ax: plt.Axes = None,
                         reduce_kwargs:dict = None,
@@ -119,7 +119,7 @@ def dimension_reduction(data:CyESIData,
     """
     reduce_kwargs = reduce_kwargs or {}
     plot_kwargs = plot_kwargs or {}
-    X = data.data
+    X = data.data if isinstance(data, CyESIData) else data
     emb = _run_dim_reduction(X, method, reduce_kwargs)
     
     if ax is None:
