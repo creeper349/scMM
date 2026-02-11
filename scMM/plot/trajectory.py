@@ -104,7 +104,7 @@ class PseudotimeEngine:
                                           plot_kwargs=plot_kwargs)
         self.adata.obsm[f"X_{method}"] = result_dict["X_emb"]
         self.adata.uns[f"{method}_params"] = result_dict["reduce_params"]
-        plt.savefig(os.path.join(self.path, f"{method}_decomposition.svg"))
+        plt.savefig(os.path.join(self.path, f"{method}_decomposition_{color_key}.svg"))
         plt.close()
         return self
         
@@ -245,3 +245,4 @@ class PseudotimeEngine:
     
     def save_adata(self, path:str):
         self.adata.write(path)
+        return self
