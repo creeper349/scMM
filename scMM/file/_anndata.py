@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from anndata import AnnData
 from typing import Optional
+from scipy.stats import zscore
 from .data import CyESIData
 
 def to_anndata(data:CyESIData):
@@ -24,6 +26,9 @@ def to_anndata(data:CyESIData):
     )
     adata.raw = adata.copy()
     return adata
+
+def _soft_threshold(x, lam):
+    return np.sign(x) * np.maximum(np.abs(x) - lam, 0)
 
 class MetaboData(AnnData):
     def __init__(self, 
@@ -75,3 +80,49 @@ class MetaboData(AnnData):
         self.uns["mz_calibration_params"] = {"a": a, "b": b,
             "ppm_res": (mz_obs_is - (a * mz_theory_is + b)) / mz_theory_is * 1e6}
         return self
+    
+    def add_omics(self, omics_key:str, omics_data:pd.DataFrame):
+        assert omics_data.shape[0] == self.n_observations, "Omics data must have same number of observations"
+        self.uns[f"omics_{omics_key}"] = omics_data
+        return self
+    
+    def max_cov_subspace(self, omics_key:str, n_components=2, 
+                        lam_x=0.2, lam_y=0.2, n_iter=200):
+        X = zscore(self.X, axis=0)
+        Y = zscore(self.uns[f"omics_{omics_key}"], axis=0)
+        n, p = X.shape
+        _, q = Y.shape
+        
+        Wx = np.zeros((p, n_components))
+        Wy = np.zeros((q, n_components))
+
+        X_res = X.copy()
+        Y_res = Y.copy()
+        
+        for comp in range(n_components):
+
+            wx = np.random.randn(p)
+            wx /= np.linalg.norm(wx)
+
+            for _ in range(n_iter):
+
+                wy = Y_res.T @ (X_res @ wx)
+                wy = _soft_threshold(wy, lam_y)
+                if np.linalg.norm(wy) > 0:
+                    wy /= np.linalg.norm(wy)
+
+                wx = X_res.T @ (Y_res @ wy)
+                wx = _soft_threshold(wx, lam_x)
+                if np.linalg.norm(wx) > 0:
+                    wx /= np.linalg.norm(wx)
+
+            Wx[:, comp] = wx
+            Wy[:, comp] = wy
+
+            X_res -= np.outer(X_res @ wx, wx)
+            Y_res -= np.outer(Y_res @ wy, wy)
+
+        Zx = X @ Wx
+        Zy = Y @ Wy
+
+        return Wx, Wy, Zx, Zy
