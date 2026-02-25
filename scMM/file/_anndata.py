@@ -474,3 +474,117 @@ class MetaboData(AnnData):
             plt.show()
 
         return G, centrality, partial_corr
+    
+    def metabolite_correlation_heatmap(
+        self,
+        target_label: str = None,
+        label_key: str = None,
+        metabolite_name_key: str = None,
+        save_path: str = None,
+        title: str = None,
+        mode: str = "feature",          # "feature" or "sample"
+        cmap: str = "coolwarm",
+        triangle: str = "full",         # "full" or "lower"
+        figsize=(8, 8),
+        vmin: float = None,
+        vmax: float = None,
+        **kwargs
+    ):
+
+        if target_label is None or label_key is None:
+            X = self.X
+        else:
+            idx = self.obs[label_key] == target_label
+            X = self.X[idx, :]
+
+        if mode == "feature":
+            corr = np.corrcoef(X, rowvar=False)
+
+            if metabolite_name_key and metabolite_name_key in self.var.columns:
+                labels = self.var[metabolite_name_key].values
+            else:
+                labels = np.arange(corr.shape[0])
+
+        elif mode == "sample":
+            corr = np.corrcoef(X, rowvar=True)
+            labels = np.arange(corr.shape[0])
+
+        else:
+            raise ValueError("mode must be 'feature' or 'sample'")
+
+        if triangle == "lower":
+            mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+            corr = corr.copy()
+            corr[mask] = np.nan
+
+        elif triangle != "full":
+            raise ValueError("triangle must be 'full' or 'lower'")
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        im = ax.imshow(
+            corr,
+            cmap=cmap,
+            vmin=vmin if vmin is not None else np.nanmin(corr),
+            vmax=vmax if vmax is not None else np.nanmax(corr)
+        )
+        
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        ax.tick_params(
+            left=False,
+            bottom=False,
+            labelleft=False if not kwargs.get("show_ticks", False) else True,
+            labelbottom=False if not kwargs.get("show_ticks", False) else True
+        )
+
+        if kwargs.get("show_ticks", False):
+            ax.set_xticks(np.arange(len(labels)))
+            ax.set_yticks(np.arange(len(labels)))
+            ax.set_xticklabels(labels, rotation=90, fontsize=6)
+            ax.set_yticklabels(labels, fontsize=6)
+        else:
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        if kwargs.get("colorbar", True):
+            fig.colorbar(im, ax=ax, label="Pearson correlation")
+
+        if title:
+            ax.set_title(title)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        else:
+            plt.show()
+
+        return corr
+    
+    def feature_scatter(self, key:str, feature_x_name:str, feature_y_name:str, color_key:str = None,
+                        title:str = None, save_path:str = None, **kwargs):
+        
+        x_idx = np.flatnonzero(self.var[key] == feature_x_name)[0]
+        y_idx = np.flatnonzero(self.var[key] == feature_y_name)[0]
+        
+        x = self.X[:, x_idx]
+        y = self.X[:, y_idx]
+
+        plt.figure(figsize=(8, 6))
+        if color_key and color_key in self.var.columns:
+            categories = self.var[color_key].unique()
+            colors = plt.cm.get_cmap('tab20', len(categories))
+            for i, cat in enumerate(categories):
+                idx = self.var[color_key] == cat
+                plt.scatter(x[idx], y[idx], label=cat, color=colors(i), alpha=kwargs.get("alpha", 0.7))
+            plt.legend()
+        else:
+            plt.scatter(x, y, alpha=kwargs.get("alpha", 0.7))
+        
+        plt.xlabel(feature_x_name)
+        plt.ylabel(feature_y_name)
+        if title: plt.title(title)
+        if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        else: plt.show()
