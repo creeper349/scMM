@@ -245,7 +245,7 @@ class MetaboData(AnnData):
         data_x = self.X[self.obs[label_key] == labelx, :]
         data_y = self.X[self.obs[label_key] == labely, :]
         
-        log2_fc = np.log2(np.mean(data_y, axis=0) / np.mean(data_x, axis=0))
+        log2_fc = np.log2(np.mean(data_x, axis=0) / np.mean(data_y, axis=0))
         pvals = np.array([ttest_ind(data_x[:, i], data_y[:, i], equal_var=False).pvalue for i in range(data_x.shape[1])])
         neg_log10_p = -np.log10(pvals)
         significant_up = (log2_fc > log2_fc_cutoff) & (pvals < p_thr)
@@ -565,7 +565,8 @@ class MetaboData(AnnData):
     
     def feature_scatter(self, key:str, feature_x_name:str, feature_y_name:str, color_key:str = None,
                         title:str = None, save_path:str = None, **kwargs):
-        
+        from sklearn.linear_model import LinearRegression
+        from scipy.stats import pearsonr
         x_idx = np.flatnonzero(self.var[key] == feature_x_name)[0]
         y_idx = np.flatnonzero(self.var[key] == feature_y_name)[0]
         
@@ -573,18 +574,80 @@ class MetaboData(AnnData):
         y = self.X[:, y_idx]
 
         plt.figure(figsize=(8, 6))
-        if color_key and color_key in self.var.columns:
-            categories = self.var[color_key].unique()
-            colors = plt.cm.get_cmap('tab20', len(categories))
+        alpha = kwargs.get("alpha", 0.7)
+        lw = kwargs.get("lw", 1)
+
+        def fit_and_plot(x_sub, y_sub, color=None, label_prefix=None):
+            mask = ~np.isnan(x_sub) & ~np.isnan(y_sub)
+            x_clean = x_sub[mask]
+            y_clean = y_sub[mask]
+
+            if len(x_clean) < 2:
+                return
+
+            X_reshape = x_clean.reshape(-1, 1)
+
+            model = LinearRegression()
+            model.fit(X_reshape, y_clean)
+            y_pred = model.predict(X_reshape)
+
+            r, p = pearsonr(x_clean, y_clean)
+
+            plt.scatter(x_clean, y_clean, 
+                        alpha=alpha, 
+                        color=color,
+                        label=f"{label_prefix} (R={r:.3f})" if label_prefix else f"R={r:.3f}")
+
+            order = np.argsort(x_clean)
+            plt.plot(x_clean[order], 
+                    y_pred[order], 
+                    color=color, 
+                    linewidth=lw,
+                    linestyle='--')
+
+        if color_key and color_key in self.obs.columns:
+            categories = self.obs[color_key].unique()
+            cmap = plt.cm.get_cmap('tab20', len(categories))
+
             for i, cat in enumerate(categories):
-                idx = self.var[color_key] == cat
-                plt.scatter(x[idx], y[idx], label=cat, color=colors(i), alpha=kwargs.get("alpha", 0.7))
+                idx = self.obs[color_key] == cat
+                fit_and_plot(
+                    x[idx], 
+                    y[idx], 
+                    color=cmap(i), 
+                    label_prefix=str(cat)
+                )
+
             plt.legend()
         else:
-            plt.scatter(x, y, alpha=kwargs.get("alpha", 0.7))
-        
+            fit_and_plot(x, y, color="steelblue")
+
         plt.xlabel(feature_x_name)
         plt.ylabel(feature_y_name)
-        if title: plt.title(title)
-        if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        else: plt.show()
+
+        if title:
+            plt.title(title)
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        else:
+            plt.show()
+            
+            plt.xlabel(feature_x_name)
+            plt.ylabel(feature_y_name)
+            if title: plt.title(title)
+            if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            else: plt.show()
+        
+    def _t_stats(self, label_key:str, labelx:str, labely:str, name_key:str, save_csv:str = None):
+        from scipy.stats import ttest_ind
+        data_x = self.X[self.obs[label_key] == labelx, :]
+        data_y = self.X[self.obs[label_key] == labely, :]
+        results = ttest_ind(data_x, data_y, axis=0, equal_var=False)
+        if save_csv:
+            df = pd.DataFrame({
+                "feature": self.var[name_key].values,
+                "t_stat": results.statistic
+            })
+            df.to_csv(save_csv, index=False)
+        return results.statistic, results.pvalue
