@@ -151,52 +151,6 @@ class MetaboData(AnnData):
             "ppm_res": (mz_obs_is - (a * mz_theory_is + b)) / mz_theory_is * 1e6}
         return self
     
-    def add_omics(self, omics_key:str, omics_data:pd.DataFrame):
-        assert omics_data.shape[0] == self.n_observations, "Omics data must have same number of observations"
-        self.uns[f"omics_{omics_key}"] = omics_data
-        return self
-    
-    def max_cov_subspace(self, omics_key:str, n_components=2, 
-                        lam_x=0.2, lam_y=0.2, n_iter=200):
-        X = zscore(self.X, axis=0)
-        Y = zscore(self.uns[f"omics_{omics_key}"], axis=0)
-        n, p = X.shape
-        _, q = Y.shape
-        
-        Wx = np.zeros((p, n_components))
-        Wy = np.zeros((q, n_components))
-
-        X_res = X.copy()
-        Y_res = Y.copy()
-        
-        for comp in range(n_components):
-
-            wx = np.random.randn(p)
-            wx /= np.linalg.norm(wx)
-
-            for _ in range(n_iter):
-
-                wy = Y_res.T @ (X_res @ wx)
-                wy = _soft_threshold(wy, lam_y)
-                if np.linalg.norm(wy) > 0:
-                    wy /= np.linalg.norm(wy)
-
-                wx = X_res.T @ (Y_res @ wy)
-                wx = _soft_threshold(wx, lam_x)
-                if np.linalg.norm(wx) > 0:
-                    wx /= np.linalg.norm(wx)
-
-            Wx[:, comp] = wx
-            Wy[:, comp] = wy
-
-            X_res -= np.outer(X_res @ wx, wx)
-            Y_res -= np.outer(Y_res @ wy, wy)
-
-        Zx = X @ Wx
-        Zy = Y @ Wy
-
-        return Wx, Wy, Zx, Zy
-    
     def plot_pca(self, n_components = 2, color_key:str = None, 
                  draw_confidence_ellipse:bool = False,
                  confidence_ellipse_scale:float = 2.447,
@@ -438,9 +392,18 @@ class MetaboData(AnnData):
         )
 
         if category_color_map is not None:
-            import matplotlib.patches as mpatches
+            from matplotlib.lines import Line2D
             handles = [
-                mpatches.Patch(color=color, label=str(cat))
+                Line2D(
+                    [0], [0],
+                    marker='o',
+                    color='w',
+                    markerfacecolor=color,
+                    markeredgecolor='black',
+                    markersize=10,
+                    linestyle='None',
+                    label=str(cat)
+                )
                 for cat, color in category_color_map.items()
             ]
             ax.legend(
@@ -482,9 +445,9 @@ class MetaboData(AnnData):
         metabolite_name_key: str = None,
         save_path: str = None,
         title: str = None,
-        mode: str = "feature",          # "feature" or "sample"
+        mode: str = "feature",  
         cmap: str = "coolwarm",
-        triangle: str = "full",         # "full" or "lower"
+        triangle: str = "full", 
         figsize=(8, 8),
         vmin: float = None,
         vmax: float = None,
@@ -563,21 +526,31 @@ class MetaboData(AnnData):
 
         return corr
     
-    def feature_scatter(self, key:str, feature_x_name:str, feature_y_name:str, color_key:str = None,
-                        title:str = None, save_path:str = None, **kwargs):
-        from sklearn.linear_model import LinearRegression
+    def feature_scatter(self,
+                        key: str,
+                        feature_x_name: str,
+                        feature_y_name: str,
+                        color_key: str = None,
+                        title: str = None,
+                        save_path: str = None,
+                        **kwargs):
+
+        import seaborn as sns
         from scipy.stats import pearsonr
+
         x_idx = np.flatnonzero(self.var[key] == feature_x_name)[0]
         y_idx = np.flatnonzero(self.var[key] == feature_y_name)[0]
-        
-        x = self.X[:, x_idx]
-        y = self.X[:, y_idx]
+
+        x = self.X[:, x_idx].astype(float)
+        y = self.X[:, y_idx].astype(float)
+
+        alpha = kwargs.get("alpha", 0.7)
+        lw = kwargs.get("lw", 1.5)
+        ci = kwargs.get("ci", None)
 
         plt.figure(figsize=(8, 6))
-        alpha = kwargs.get("alpha", 0.7)
-        lw = kwargs.get("lw", 1)
 
-        def fit_and_plot(x_sub, y_sub, color=None, label_prefix=None):
+        def regplot_one(x_sub, y_sub, color=None, label_prefix=None):
             mask = ~np.isnan(x_sub) & ~np.isnan(y_sub)
             x_clean = x_sub[mask]
             y_clean = y_sub[mask]
@@ -585,42 +558,36 @@ class MetaboData(AnnData):
             if len(x_clean) < 2:
                 return
 
-            X_reshape = x_clean.reshape(-1, 1)
-
-            model = LinearRegression()
-            model.fit(X_reshape, y_clean)
-            y_pred = model.predict(X_reshape)
-
             r, p = pearsonr(x_clean, y_clean)
 
-            plt.scatter(x_clean, y_clean, 
-                        alpha=alpha, 
-                        color=color,
-                        label=f"{label_prefix} (R={r:.3f})" if label_prefix else f"R={r:.3f}")
-
-            order = np.argsort(x_clean)
-            plt.plot(x_clean[order], 
-                    y_pred[order], 
-                    color=color, 
-                    linewidth=lw,
-                    linestyle='--')
+            sns.regplot(
+                x=x_clean,
+                y=y_clean,
+                scatter=True,
+                ci=ci,
+                color=color,
+                line_kws={'lw': 2, 'color': 'black'},
+                scatter_kws={'s': 40, 'edgecolor': 'white', 'alpha': 1.0},
+                label=f"{label_prefix} (R={r:.3f})" if label_prefix else f"R={r:.3f}"
+            )
 
         if color_key and color_key in self.obs.columns:
             categories = self.obs[color_key].unique()
-            cmap = plt.cm.get_cmap('tab20', len(categories))
+            palette = sns.color_palette("tab20", len(categories))
 
             for i, cat in enumerate(categories):
                 idx = self.obs[color_key] == cat
-                fit_and_plot(
-                    x[idx], 
-                    y[idx], 
-                    color=cmap(i), 
+                regplot_one(
+                    x[idx],
+                    y[idx],
+                    color=palette[i],
                     label_prefix=str(cat)
                 )
 
             plt.legend()
+
         else:
-            fit_and_plot(x, y, color="steelblue")
+            regplot_one(x, y, color="steelblue")
 
         plt.xlabel(feature_x_name)
         plt.ylabel(feature_y_name)
@@ -628,16 +595,8 @@ class MetaboData(AnnData):
         if title:
             plt.title(title)
 
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        else:
-            plt.show()
-            
-            plt.xlabel(feature_x_name)
-            plt.ylabel(feature_y_name)
-            if title: plt.title(title)
-            if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
-            else: plt.show()
+        if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        else: plt.show()
         
     def _t_stats(self, label_key:str, labelx:str, labely:str, name_key:str, save_csv:str = None):
         from scipy.stats import ttest_ind
@@ -651,3 +610,116 @@ class MetaboData(AnnData):
             })
             df.to_csv(save_csv, index=False)
         return results.statistic, results.pvalue
+
+    def feature_compare(self,
+                        feature_key: str,
+                        feature_name: str,
+                        group_list: list,
+                        name_key: str,
+                        plot_type: str = "violin",
+                        test_method: str = "t",
+                        show_points: bool = True,
+                        title: str = None,
+                        save_path: str = None,
+                        **kwargs):
+        from scipy.stats import ttest_ind, mannwhitneyu, f_oneway, kruskal
+        import seaborn as sns
+        
+        feat_idx = np.flatnonzero(self.var[feature_key] == feature_name)[0]
+        values = self.X[:, feat_idx].astype(float)
+
+        df = pd.DataFrame({
+            "value": values,
+            "group": self.obs[name_key].values
+        })
+
+        df = df[df["group"].isin(group_list)]
+        df = df.dropna()
+
+        plt.figure(figsize=(8, 6))
+
+        if plot_type == "bar":
+            sns.barplot(data=df, x="group", y="value", hue="group",
+                        order=group_list, palette="Set2", legend=False,
+                        errorbar="sd")
+
+        elif plot_type == "box":
+            sns.boxplot(data=df, x="group", y="value", hue = "group",
+                        order=group_list, palette="Set2", legend=False)
+
+        elif plot_type == "violin":
+            sns.violinplot(
+                    data=df,
+                    x="group",
+                    y="value",
+                    hue="group",
+                    order=group_list,
+                    palette="Set2",
+                    legend=False
+                )
+
+        else:
+            raise ValueError("plot_type must be bar/box/violin")
+
+        if show_points:
+            sns.stripplot(data=df, x="group", y="value",
+                        order=group_list,
+                        color="black",
+                        alpha=0.4,
+                        size=3,
+                        jitter=True)
+
+        grouped = [df[df["group"] == g]["value"].values for g in group_list]
+
+        if len(group_list) == 2:
+            if test_method == "t":
+                stat, p = ttest_ind(grouped[0], grouped[1], equal_var=False)
+            elif test_method == "mannwhitney":
+                stat, p = mannwhitneyu(grouped[0], grouped[1], alternative="two-sided")
+            else:
+                raise ValueError("For 2 groups: t / mannwhitney")
+
+        else:
+            if test_method == "anova":
+                stat, p = f_oneway(*grouped)
+            elif test_method == "kruskal":
+                stat, p = kruskal(*grouped)
+            else:
+                raise ValueError("For >2 groups: anova / kruskal")
+
+        if p < 1e-4:
+            stars = "****"
+        elif p < 1e-3:
+            stars = "***"
+        elif p < 1e-2:
+            stars = "**"
+        elif p < 0.05:
+            stars = "*"
+        else:
+            stars = "ns"
+
+        if len(group_list) == 2:
+            y_max = df["value"].max()
+            y_min = df["value"].min()
+            h = (y_max - y_min) * 0.08
+
+            plt.plot([0, 0, 1, 1],
+                    [y_max+h, y_max+2*h, y_max+2*h, y_max+h],
+                    lw=1.5, c="black")
+
+            plt.text(0.5, y_max+2*h, stars,
+                    ha='center', va='bottom')
+
+        p_text = f"p = {p:.3e}"
+        final_title = f"{feature_name}\n{p_text}"
+        if title:
+            final_title = title + "\n" + p_text
+
+        plt.title(final_title)
+        plt.xlabel(name_key)
+        plt.ylabel("Intensity")
+
+        sns.despine()
+
+        if save_path: plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        else: plt.show()
