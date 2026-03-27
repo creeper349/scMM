@@ -393,3 +393,52 @@ class CorrAnalEngine:
         plt.close()
 
         return df
+    
+    def plot_feature_scatter(self, omics1:str, omics2:str, feature1:str, feature2:str, 
+                             name_key1:str, name_key2:str, reg:bool=True, **kwargs):
+        
+        from scipy.stats import spearmanr, pearsonr
+        x = self.omics[omics1].X
+        y = self.omics[omics2].X
+        x_idx = (self.omics[omics1].var[name_key1] == feature1).to_numpy()
+        y_idx = (self.omics[omics2].var[name_key2] == feature2).to_numpy()
+        feature_x = x[:, x_idx].ravel()
+        feature_y = y[:, y_idx].ravel()
+        fig, ax = plt.subplots(figsize=kwargs.get("figsize", (6,6)))
+        sns.scatterplot(x=feature_x, y=feature_y, alpha=kwargs.get("alpha", 0.9), color=kwargs.get("dot_color", "black"))
+        if reg:
+            sns.regplot(x=feature_x, y=feature_y, scatter=False,
+                        color=kwargs.get("line_color", "red"), line_kws={"linewidth":1}, ci=kwargs.get("ci", None))
+        method = kwargs.get("corr_method", "pearson")
+        if method == "spearman":
+            r, p = spearmanr(feature_x, feature_y)
+            label = f"Spearman r = {r:.3f}\np = {p:.2e}"
+        else:
+            r, p = pearsonr(feature_x, feature_y)
+            label = f"Pearson r = {r:.3f}\np = {p:.2e}"
+        ax.text(
+            0.05, 0.95,
+            label,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10
+        )
+        plt.xlabel(feature1)
+        plt.ylabel(feature2)
+        plt.tight_layout()
+        plt.savefig(join(self.save_path, f"{omics1}_{omics2}_{feature1}_vs_{feature2}_scatter.svg"), bbox_inches="tight")
+        plt.close()
+        
+    def plot_feature_corr_dist(self, omics1:str, omics2:str, feature_name:str, **kwargs):
+        if f"{omics1}_{omics2}_corr" not in self.uns:
+            raise KeyError(f"{omics1}_{omics2}_corr not found in self.uns")
+        
+        corr_df = self.uns[f"{omics1}_{omics2}_corr"]
+        dist = corr_df.loc[feature_name, :].values.ravel()
+        sns.displot(dist, kde=True, height=kwargs.get("height", 4), aspect=kwargs.get("aspect", 1.5))
+        plt.xlabel(f"{omics2} correlation with {feature_name}")
+        plt.savefig(join(self.save_path, f"{omics1}_{omics2}_{feature_name}_corr_dist.svg"), bbox_inches="tight")
+        plt.close()
+        
+        return corr_df.columns[np.argsort(dist)[::-1]], dist[np.argsort(dist)[::-1]]

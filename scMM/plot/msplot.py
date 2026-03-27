@@ -72,3 +72,99 @@ def plot_hook(stage, data):
             ax[1].set_ylabel("m/z loadings")
             plt.savefig(f"debug_{stage}.svg")
             plt.close(fig)
+
+def plot_spectrum(
+        spec,
+        top_n_labels: int = 0,
+        mz_range: tuple[float, float] | None = None,
+        intensity_range: tuple[float, float] | None = None,
+        normalize: bool = False,
+        exclusion_window: float = 10.0,
+        label_fmt: str = "{:.4f}",
+        title: str | None = None,
+        figsize: tuple[float, float] = (10, 4),
+        linewidth: float = 1.0,
+        save_path: str | None = None,
+        ax=None,
+        **kwargs
+    ):
+    mz, inten = spec.get_peaks()
+    mz = np.asarray(mz, dtype=float)
+    inten = np.asarray(inten, dtype=float)
+
+    order = np.argsort(mz)
+    mz = mz[order]
+    inten = inten[order]
+    if mz_range is not None:
+        mask = (mz >= mz_range[0]) & (mz <= mz_range[1])
+        mz = mz[mask]
+        inten = inten[mask]
+
+    if normalize:
+        max_i = np.max(inten)
+        if max_i > 0:
+            inten = inten / max_i
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    ax.plot(mz, inten, linewidth=linewidth, color = kwargs.get("color", "black"))
+
+    ax.set_xlabel("m/z")
+    ax.set_ylabel("Relative Intensity" if normalize else "Intensity")
+
+    if title is None:
+        ms_level = spec.getMSLevel() if hasattr(spec, "getMSLevel") else None
+        title = f"MS{ms_level} Spectrum" if ms_level else "Spectrum"
+    ax.set_title(title)
+
+    if intensity_range is not None:
+        ax.set_ylim(*intensity_range)
+
+    if top_n_labels and top_n_labels > 0:
+        idx_sorted = np.argsort(inten)[::-1]
+        selected = []
+
+        for idx in idx_sorted:
+            x = mz[idx]
+
+            too_close = any(abs(x - mz[j]) < exclusion_window for j in selected)
+            if too_close:
+                continue
+
+            selected.append(idx)
+            if len(selected) >= top_n_labels:
+                break
+
+        selected = sorted(selected, key=lambda i: mz[i])
+
+        y_max = np.max(inten)
+        offset = 0.03 * y_max if y_max > 0 else 0.03
+
+        for idx in selected:
+            x = mz[idx]
+            y = inten[idx]
+
+            ax.annotate(
+                label_fmt.format(x),
+                xy=(x, y),
+                xytext=(x, y + offset),
+                textcoords="data",
+                ha="center",
+                fontsize=9,
+                arrowprops=dict(arrowstyle="-", lw=0.8),
+            )
+
+    ax.margins(x=0.01)
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    if created_fig:
+        plt.show()
+
+    return fig, ax

@@ -1,12 +1,11 @@
-from .corr import CorrAnalEngine
-from .msplot import eic, plot_ms, plot_hook
-from .embedding import dimension_reduction, register_dim
-from .trajectory import to_anndata, PseudotimeEngine
-from .util import batch_lion_wordclouds
+from matplotlib import font_manager
+import matplotlib.pyplot as plt
 
-__all__ = [
-    "CorrAnalEngine",
-    "eic", "plot_ms", "plot_hook",
-    "dimension_reduction", "register_dim",
-    "to_anndata", "PseudotimeEngine", "batch_lion_wordclouds"
-]
+fname = "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"
+
+font_manager.fontManager.addfont(fname)
+
+prop = font_manager.FontProperties(fname=fname)
+family_name = prop.get_name()
+
+plt.rcParams["font.family"] = family_name

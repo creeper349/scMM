@@ -15,9 +15,10 @@ def run():
     
 @timer
 def concat():
-    align_batch("/home/zby/scMM/file/0117-processed", "/home/zby/scMM/file/concat", base = "1709-add")
+    align_batch("/home/zby/scMM/data/algea-0313/results", "/home/zby/scMM/data/algea-0313/aligned", base = "1747")
     
 if __name__=="__main__":
+    concat()
     """
     from .plot.embedding import dimension_reduction
     import matplotlib.pyplot as plt
@@ -25,7 +26,7 @@ if __name__=="__main__":
     dimension_reduction(data, method = "umap", color = data[832.3437], reduce_kwargs={"n_neighbors": 80}, plot_kwargs = {"s": 2, "palette": "tab20"})
     plt.savefig(f"umap_label_quantile_832.svg")
     """
-    
+    """
     from .plot.trajectory import PseudotimeEngine
     from .plot.mpl_style import *
     data = CyESIData.load_from_processed("/home/zby/src/files/concat/1709-add", dtype=np.float32)
@@ -36,7 +37,7 @@ if __name__=="__main__":
         .decomposition("umap", color_key = "time", reduce_kwargs={"n_neighbors": 80})
         .run_palantir(root_key="is_root", root_value = True).diffmap()
         .plot_branches().save_adata("/home/zby/src/files/result/h2o2.hdf5"))
-    engine.adata.obs.to_csv("/home/zby/src/files/result/fig/palantir_obs.csv")
+    engine.adata.obs.to_csv("/home/zby/src/files/result/fig/palantir_obs.csv")"""
     #run_traj(data, fig_path_dir = "/home/zby/scMM/file/result/fig", start_idx = 4158) #4443
     """
     from .plot.trajectory import PseudotimeEngine

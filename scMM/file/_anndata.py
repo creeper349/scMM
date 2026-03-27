@@ -10,27 +10,6 @@ from .data import CyESIData
 from sklearn.covariance import GraphicalLasso
 from sklearn.preprocessing import StandardScaler
 
-def to_anndata(data:CyESIData):
-    obs_df = pd.DataFrame({
-        "cell_id": data.data.index,
-        "labels": data.get_labels(),
-        "time": data.get_time(),
-        "width": data.peak_meta['width'].values,
-        "symmetry": data.peak_meta['symmetry'].values
-    })
-    
-    var_df = pd.DataFrame({
-        "mz": data.data.columns
-    })
-    
-    adata = AnnData(
-        X=data.data.values,
-        obs=obs_df.set_index("cell_id"),
-        var=var_df.set_index("mz")
-    )
-    adata.raw = adata.copy()
-    return adata
-
 def _soft_threshold(x, lam):
     return np.sign(x) * np.maximum(np.abs(x) - lam, 0)
 
@@ -345,7 +324,6 @@ class MetaboData(AnnData):
         ]
 
         pos = nx.spring_layout(H, seed=layout_seed, weight="weight")
-
         node_colors = "lightgray"
         category_color_map = None
 

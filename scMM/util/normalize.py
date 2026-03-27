@@ -25,6 +25,14 @@ def norm_total(X, params):
 
     return X / row_sum * scale
 
+@register_norm("max")
+def norm_max(X, params):
+    
+    X = _check_array(X)
+    max_val = X.max(axis=params.get("axis", 1), keepdims=True)
+
+    return X / max_val
+
 @register_norm("quantile")
 def norm_quantile(X, params):
     
@@ -83,18 +91,11 @@ def norm_zscore(X, params):
 def norm_log(X, params):
     
     X = _check_array(X)
-
-    base = params.get("base", 2)
     pseudo = params.get("pseudo", 1e-6)
 
     Xp = X + pseudo
-
-    if base == 2:
-        return np.log2(Xp)
-    elif base == 10:
-        return np.log10(Xp)
-    else:
-        return np.log(Xp) / np.log(base)
+    
+    return np.log1p(Xp)
 
 @register_norm("minmax")
 def norm_minmax(X, params):

@@ -2,12 +2,13 @@ from typing import Literal, Tuple, Dict, Any
 from scipy.signal import find_peaks
 from joblib import Parallel, delayed
 from tqdm import tqdm
+from datetime import datetime
 import pyopenms as oms
 import pandas as pd
 import numpy as np
 import os
 
-def load_file(
+def load_single_file(
     path: str,
     format: Literal['auto', 'mzML', 'mzXML'] = 'mzML'
 ) -> Tuple[oms.MSExperiment, Dict[str, Any]]:
@@ -23,139 +24,230 @@ def load_file(
 
     metadata = {}
     metadata["name"], _ = os.path.splitext(os.path.basename(path))
+    metadata["timestamp"] = datetime.strptime(exp.getDateTime().get(), "%Y-%m-%d %H:%M:%S").timestamp()
+    metadata["instrument"] = exp.getInstrument().getName()
 
     return exp, metadata
 
-def _extract_peaks(index:int, spec: oms.MSSpectrum, dtype = np.float64) -> Tuple[np.ndarray, np.ndarray]:
+def sum_spec(
+        exp: oms.MSExperiment,
+        mz_range=(100.0, 1000.0),
+        ppm=5.0,
+        ms_level=1,
+    ):
+
+    mz_min, mz_max = mz_range
+    ratio = 1.0 + ppm * 1e-6
+    n_bins = int(np.floor(np.log(mz_max / mz_min) / np.log(ratio))) + 1
+    mz_grid = mz_min * (ratio ** np.arange(n_bins, dtype=np.float64))
+
+    acc = np.zeros_like(mz_grid, dtype=np.float64)
+    total_spectra = 0
+
+    for spec in exp:
+        if spec.getMSLevel() != ms_level:
+            continue
+
+        mz, inten = spec.get_peaks()
+        mz = np.asarray(mz, dtype=np.float64)
+        inten = np.asarray(inten, dtype=np.float64)
+
+        if mz.size == 0:
+            continue
+
+        mask = (mz >= mz_min) & (mz <= mz_max)
+        if not np.any(mask):
+            continue
+
+        mz = mz[mask]
+        inten = inten[mask]
+
+        if np.any(np.diff(mz) < 0):
+            order = np.argsort(mz)
+            mz = mz[order]
+            inten = inten[order]
+
+        if mz.size >= 2:
+            uniq = np.empty(mz.size, dtype=bool)
+            uniq[0] = True
+            uniq[1:] = mz[1:] > mz[:-1]
+            mz = mz[uniq]
+            inten = inten[uniq]
+
+        if mz.size == 0:
+            continue
+        idx = np.rint(np.log(mz / mz_min) / np.log(ratio)).astype(np.int64)
+        valid = (idx >= 0) & (idx < acc.size)
+        if np.any(valid):
+            np.add.at(acc, idx[valid], inten[valid])
+
+        total_spectra += 1
+
+    if total_spectra == 0:
+        raise ValueError("No spectra found.")
+
+    avg_intensity = acc
+    spec_out = oms.MSSpectrum()
+    spec_out.setMSLevel(ms_level)
+    spec_out.setRT(0.0)
+
+    spec_out.set_peaks((
+        mz_grid.astype(np.float64),
+        avg_intensity.astype(np.float32)
+    ))
+    spec_out.setMetaValue("n_averaged_spectra", int(total_spectra))
+    spec_out.setMetaValue("ppm", float(ppm))
+    spec_out.setMetaValue("mz_min", float(mz_min))
+    spec_out.setMetaValue("mz_max", float(mz_max))
+
+    return spec_out
+
+def sum_spectrum_from_file(
+        path: str,
+        ms_level: int = 1,
+        mz_binning_width: float = 5.0,
+    ) -> tuple[oms.MSSpectrum, int]:
+    exp = oms.MSExperiment()
+    oms.MzMLFile().load(path, exp)
+    return sum_spec(
+        exp,
+        ms_level=ms_level,
+        ppm=mz_binning_width
+    )
+
+def extract_peaks(index:int, spec: oms.MSSpectrum, dtype = np.float64,
+                  prominence_ratio: float = None, distance:int = 3) -> Tuple[np.ndarray, np.ndarray]:
     mz = np.array(spec.get_peaks()[0], dtype=dtype)
     intensity = np.array(spec.get_peaks()[1], dtype=dtype)
     
     if len(mz) == 0:
         return spec.getRT(), np.array([]), np.array([])
 
-    peak_idx, _ = find_peaks(intensity)
+    peak_idx, _ = find_peaks(intensity, 
+                    prominence=np.max(intensity) * prominence_ratio if prominence_ratio is not None else None,
+                    distance=distance)
     peak_mz = mz[peak_idx]
     peak_intensity = intensity[peak_idx]
 
     return index, spec.getRT(), peak_mz, peak_intensity
 
-def _merge_mz(all_mz:list, all_intensity:list, ppm_tol:int, dtype=np.float64) -> pd.DataFrame:
-    n_frame = len(all_mz)
-
-    frame_idx = np.concatenate([i*np.ones_like(mz, dtype=np.int32) for i, mz in enumerate(all_mz)])
-    all_mz = np.concatenate(all_mz).astype(dtype)
-    all_intensity = np.concatenate(all_intensity).astype(dtype)
-
-    order = np.argsort(all_mz)
-    all_mz = all_mz[order]
-    all_intensity = all_intensity[order]
-    frame_idx = frame_idx[order]
-
-    groups = np.zeros_like(all_mz, dtype=np.int32)
-    group_id = 0
-    group_sum = all_mz[0]
-    group_count = 1
-
-    for i in range(1, len(all_mz)):
-        avg = group_sum / group_count
-        ppm = (all_mz[i] - avg) / avg * 1e6
-        if ppm <= ppm_tol:
-            group_sum += all_mz[i]
-            group_count += 1
-        else:
-            group_id += 1
-            group_sum = all_mz[i]
-            group_count = 1
-        groups[i] = group_id
-
-    n_groups = groups.max() + 1
-
-    merged_mz = np.bincount(groups, weights=all_mz) / np.bincount(groups)
-    merged_mz = merged_mz.astype(dtype)
-
-    intensity_matrix = np.zeros((n_frame, n_groups), dtype=dtype)
-
-    for g in range(n_groups):
-        mask = groups == g
-        frames = frame_idx[mask]
-        ints = all_intensity[mask]
-        for f, val in zip(frames, ints):
-            intensity_matrix[f, g] += val
-
-    return intensity_matrix, merged_mz
-
-def _post_merge_features(
-    intensity: np.ndarray,
-    mz: np.ndarray, 
-    ppm_tol: float = 10,
-    comp_thresh: float = 0.9,
+def align_frame(
+    exp: oms.MSExperiment,
+    mz_list,
+    ppm: float = 10.0,
+    ms_level: int = 1,
+    aggregate: str = "sum",
     dtype=np.float64,
+    **kwargs
 ):
-    n_feat = len(mz)
-    used = np.zeros(n_feat, dtype=bool)
 
-    new_mz = []
-    new_intensity = []
+    targets = np.asarray(mz_list, dtype=np.float64)
+    order = np.argsort(targets)
+    targets_sorted = targets[order]
+    inv_order = np.empty_like(order)
+    inv_order[order] = np.arange(order.size)
 
-    for i in range(n_feat):
-        if used[i]:
+    n_targets = targets_sorted.size
+
+    spectra = []
+    rt_list = []
+    frame_ids = []
+
+    for i, spec in enumerate(exp):
+        if spec.getMSLevel() != ms_level:
+            continue
+        spectra.append((i, spec))
+        rt_list.append(spec.getRT())
+        frame_ids.append(i)
+
+    n_frames = len(spectra)
+    if n_frames == 0:
+        raise ValueError("No spectra found.")
+
+    X = np.zeros((n_frames, n_targets), dtype=np.float32)
+
+    for row_idx, (i, spec) in enumerate(spectra):
+
+        _, rt, mz, inten = extract_peaks(i, spec, dtype=dtype,
+            prominence_ratio=kwargs.get("prominence_ratio", None), distance=kwargs.get("distance", 3))
+
+        if mz.size == 0:
             continue
 
-        group = [i]
-        used[i] = True
+        if mz.size >= 2 and np.any(np.diff(mz) < 0):
+            idx = np.argsort(mz)
+            mz = mz[idx]
+            inten = inten[idx]
 
-        for j in range(i + 1, n_feat):
-            if used[j]:
-                continue
+        pos = np.searchsorted(targets_sorted, mz)
 
-            ppm = abs(mz[i] - mz[j]) / ((mz[i] + mz[j]) / 2) * 1e6
-            if ppm > ppm_tol:
-                break
+        left_idx = pos - 1
+        right_idx = pos
 
-            nz_i = intensity[:, i] > 0
-            nz_j = intensity[:, j] > 0
+        left_valid = left_idx >= 0
+        right_valid = right_idx < n_targets
 
-            union = np.sum(nz_i | nz_j)
-            if union == 0:
-                continue
+        left_ppm = np.full(mz.shape, np.inf)
+        right_ppm = np.full(mz.shape, np.inf)
 
-            intersection = np.sum(nz_i & nz_j)
-            complementarity = 1 - intersection / union
+        if np.any(left_valid):
+            t = targets_sorted[left_idx[left_valid]]
+            left_ppm[left_valid] = np.abs(mz[left_valid] - t) / t * 1e6
 
-            if complementarity >= comp_thresh:
-                group.append(j)
-                used[j] = True
+        if np.any(right_valid):
+            t = targets_sorted[right_idx[right_valid]]
+            right_ppm[right_valid] = np.abs(mz[right_valid] - t) / t * 1e6
 
-        group_int = intensity[:, group]
-        total_int = group_int.sum(axis=0)
-        mz_weighted = np.sum(mz[group] * total_int) / np.sum(total_int)
+        choose_left = left_ppm <= right_ppm
+        best_idx = np.where(choose_left, left_idx, right_idx)
+        best_ppm = np.where(choose_left, left_ppm, right_ppm)
 
-        new_mz.append(mz_weighted)
-        new_intensity.append(group_int.sum(axis=1))
+        matched = (best_idx >= 0) & (best_idx < n_targets) & (best_ppm <= ppm)
+        if not np.any(matched):
+            continue
 
-    new_intensity = np.vstack(new_intensity).T.astype(dtype)
-    new_mz = np.array(new_mz, dtype=dtype)
+        tgt_idx = best_idx[matched]
+        tgt_int = inten[matched]
 
-    return new_intensity, new_mz
+        if aggregate == "sum":
+            np.add.at(X[row_idx], tgt_idx, tgt_int.astype(np.float32))
 
-def frame_concat(exp: oms.MSExperiment, ppm_tol: int = 10, zero_filter: float = 0.99, dtype = np.float64) -> pd.DataFrame: 
-    
-    results = []
-    for i, spec in tqdm(enumerate(exp), desc="Loading spectra"):
-        results.append(_extract_peaks(i, spec, dtype=dtype))
+        elif aggregate == "max":
+            s = np.argsort(tgt_idx)
+            tgt_idx_s = tgt_idx[s]
+            tgt_int_s = tgt_int[s]
 
-    results = sorted(results, key=lambda x: x[0])
-    frame_index = np.array([res[0] for res in results], dtype=int)
-    rts = np.array([res[1] for res in results], dtype=dtype)
-    all_mz = [res[2] for res in results]
-    all_int = [res[3] for res in results]
-    
-    intensity_matrix, merged_mz = _merge_mz(all_mz, all_int, ppm_tol, dtype=dtype)
-    intensity_matrix, merged_mz = _post_merge_features(intensity_matrix, merged_mz, ppm_tol, comp_thresh=0.9, dtype=dtype)
-    zero_ratio = np.sum(intensity_matrix == 0, axis=0) / intensity_matrix.shape[0]
-    keep_mask = zero_ratio < zero_filter
-    intensity_matrix = intensity_matrix[:, keep_mask]
-    merged_mz = merged_mz[keep_mask]
-    df = pd.DataFrame(intensity_matrix, columns=merged_mz, index=frame_index)
-    
-    return df, pd.DataFrame({"RT": rts })
+            uniq, start = np.unique(tgt_idx_s, return_index=True)
+            max_vals = np.maximum.reduceat(tgt_int_s, start)
+            X[row_idx, uniq] = np.maximum(X[row_idx, uniq], max_vals.astype(np.float32))
+
+        else:
+            raise ValueError("aggregate must be 'sum' or 'max'")
+
+    X = X[:, inv_order]
+
+    df = pd.DataFrame(X, index=frame_ids, columns=targets)
+    df.index.name = "frame"
+
+    rt_df = pd.DataFrame({
+        "rt": rt_list
+    }, index=frame_ids)
+
+    return df, rt_df
+
+def pack_specs(
+        spec_list,
+        reset_rt=True,
+        rt_step=1.0
+    ):
+    exp = oms.MSExperiment()
+
+    for i, spec in enumerate(spec_list):
+        spec_copy = oms.MSSpectrum(spec)
+
+        if reset_rt:
+            spec_copy.setRT(i * rt_step)
+
+        exp.addSpectrum(spec_copy)
+
+    return exp
