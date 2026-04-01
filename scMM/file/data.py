@@ -4,6 +4,7 @@ import json
 import pandas as pd
 import logging
 from joblib import Parallel, delayed
+from anndata import AnnData
 
 from .io import (load_single_file, 
                  sum_spec, 
@@ -11,14 +12,13 @@ from .io import (load_single_file,
                  align_frame, 
                  sum_spectrum_from_file, 
                  pack_specs)
-from ..util.peak import peak_detection_recon, peak_profiling
+from ..util.peak import filter_spectrum, find_cell_peaks
 from ..util.normalize import normalize
 
 from typing import Callable, Optional, Dict, Any, Self, Literal, Hashable
 from scipy.ndimage import median_filter, grey_opening
 from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.ensemble import IsolationForest
-from datetime import datetime
 
 DebugHook = Callable[[str, Dict[str, Any]], None]
 
@@ -29,6 +29,7 @@ def _align_frame_from_file(
     dtype=np.float64
 ):
     exp, file_meta = load_single_file(file_path, format="auto")
+    logging.info(f"Aligning frames from MS file {file_path}...")
     data, peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
     return {
         "file_meta": file_meta,
@@ -37,12 +38,12 @@ def _align_frame_from_file(
     }
 
 class CyESIData:
-    def __init__(self, result_dir:str, dtype = np.float64):
+    def __init__(self, result_dir:str):
         with open(os.path.join(result_dir, ".meta"), 'r') as fp:
             file_meta = json.load(fp)
 
         data_path_pkl = os.path.join(result_dir, "data.pkl")
-        peak_path_pkl = os.path.join(result_dir, "peak_profile.pkl")
+        peak_path_pkl = os.path.join(result_dir, "peak_meta.pkl")
         data = None
         peak_meta = None
         if os.path.exists(data_path_pkl):
@@ -51,11 +52,11 @@ class CyESIData:
                 peak_meta = pd.read_pickle(peak_path_pkl)
         else:
             data_path_csv = os.path.join(result_dir, "data.csv")
-            peak_path_csv = os.path.join(result_dir, "peak_profile.csv")
+            peak_path_csv = os.path.join(result_dir, "peak_meta.csv")
             if os.path.exists(data_path_csv):
-                data = pd.read_csv(data_path_csv, index_col=0, dtype=dtype)
+                data = pd.read_csv(data_path_csv, index_col=0)
             if os.path.exists(peak_path_csv):
-                peak_meta = pd.read_csv(peak_path_csv, index_col=0, dtype=dtype)
+                peak_meta = pd.read_csv(peak_path_csv, index_col=0)
 
         if data is None:
             raise FileNotFoundError(f"No processed data found in {result_dir}")
@@ -68,18 +69,23 @@ class CyESIData:
                     ref_mz: Optional[float] = None, 
                     dtype = np.float64,
                     ppm_tol: int = 10,
+                    resolution: float = 35000,
+                    resample_points_per_fwhm: float = 5.0,
+                    ms_peak_snr_threshold: float = 10.0,
                     prominence_ratio: float = None,
-                    distance:int = 3):
+                    distance:int = 3,
+                    **preprocess_kwds):
         obj = object.__new__(cls)
         exp, obj.file_meta = load_single_file(file_path, format='auto')
-        sum_ = sum_spec(exp)
+        sum_ = sum_spec(exp, resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
         obj.file_meta["ref_mz"] = ref_mz
         
-        mz_list = extract_peaks(0, sum_, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance)
+        sum_ = filter_spectrum(sum_, snr_threshold=ms_peak_snr_threshold)
+        mz_list, _ = extract_peaks(sum_, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance)
         obj.data, obj.peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
         obj.peak_meta["time"] = obj.peak_meta["rt"] / np.max(obj.peak_meta["rt"])
         obj.ref_mz = ref_mz
-        obj.preprocess()
+        obj.preprocess(**preprocess_kwds)
         return obj
         
     @classmethod
@@ -87,18 +93,30 @@ class CyESIData:
                     ref_mz: Optional[float] = None,
                     dtype = np.float64,
                     ppm_tol: int = 10,
+                    resolution: float = 35000,
+                    resample_points_per_fwhm: float = 5.0,
+                    ms_peak_snr_threshold: float = 10.0,
                     prominence_ratio: float = None,
                     n_jobs:int = -1,
-                    distance:int = 3):
+                    distance:int = 3,
+                    **preprocess_kwds):
         files = os.listdir(dir_path)
         filelist = []
         for file in files:
             full_path = os.path.join(dir_path, file)
             if (not os.path.isdir(full_path)) and file.lower().endswith((".mzml", ".mzxml")):
                 filelist.append(full_path)
-        _sum_specs = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(sum_spectrum_from_file)(f) for f in filelist)
-        total_sum_spec = sum_spec(pack_specs(_sum_specs))
-        _, _, mz_list, _ = extract_peaks(0, total_sum_spec, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance)
+        logging.info(f"Detected files in targeted directory: {filelist}")
+        logging.info(f"Summing MS Spectrometry, resolution={resolution}, resample points per FWHM={resample_points_per_fwhm}...")
+        _sum_specs = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(sum_spectrum_from_file)(f, resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
+            for f in filelist)
+        total_sum_spec = sum_spec(pack_specs(_sum_specs), resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
+        
+        logging.info(f"Performing summed-MS denoising, snr_threshold={ms_peak_snr_threshold}...")
+        total_sum_spec = filter_spectrum(total_sum_spec, snr_threshold=ms_peak_snr_threshold)
+        logging.info(f"Performing summed-MS peak picking...")
+        mz_list, _ = extract_peaks(total_sum_spec, prominence_ratio=prominence_ratio, distance=distance)
         align_results = Parallel(n_jobs=n_jobs)(
             delayed(_align_frame_from_file)(
                 fp, mz_list, ppm_tol=ppm_tol, dtype=dtype
@@ -106,6 +124,8 @@ class CyESIData:
             for fp in filelist
         )
         
+        logging.info(f"Building data container class...")
+        align_results = sorted(align_results,key=lambda x: x["file_meta"]["timestamp"])
         obj = cls.__new__(cls)
         obj.data = None
         obj.peak_meta = None
@@ -146,19 +166,16 @@ class CyESIData:
             "per_file_meta": per_file_meta,
         }
         obj.ref_mz = ref_mz
-
-        obj.preprocess()
+        
+        logging.info(f"Performing denoising and cell peak picking...")
+        obj.preprocess(**preprocess_kwds)
         return obj
         
-    def preprocess(self, baseline_filter = grey_opening, 
-                         baseline_filter_size:int = 15,
-                         peak_lam:float = 0.5, 
-                         peak_sigma_min:float = 1e-3, 
-                         tau:float = 2,
-                         zero_threshold:float = 0.9,
-                         peak_profiles: list = ['rt', 'width', 'symmetry'],
-                         subtract_baseline: bool = False,
-                         n_jobs:int = -1, 
+    def preprocess(self, baseline_filter = median_filter, 
+                         baseline_filter_size:int = 50,
+                         cell_snr:float = 5.0,
+                         peak_snr:float = 3.0,
+                         max_zero_frac:float = 0.9,
                          debug_hook: Optional[DebugHook] = None,
                          **kwargs):
         
@@ -166,29 +183,12 @@ class CyESIData:
             if debug_hook is not None:
                 debug_hook(stage, payload)
                 
-        cell_mask, peak_mask, C, B, sigma, r1 = peak_detection_recon(self.data, 
-                                                    baseline_filter=baseline_filter,
-                                                    baseline_filter_size=baseline_filter_size,
-                                                    ref_mz=self.ref_mz,
-                                                    peak_lam=peak_lam,
-                                                    peak_sigma_min=peak_sigma_min,
-                                                    tau=tau,
-                                                    n_jobs=n_jobs,
-                                                    dtype=self.data.values.dtype,
-                                                    **kwargs)
-        emit("peak_detection", data = self.data, cell_mask=cell_mask, ref_mz=self.ref_mz)
-        emit("cell_signal", C = C, data = self.data, ref_mz=self.ref_mz)
-        emit("r1", r1 = r1)
-        self.data, self.peak_meta = peak_profiling(self.data, B, cell_mask, peak_mask, 
-                                                   time = self.peak_meta["rt"].values, 
-                                                   ref_mz=self.ref_mz, 
-                                                   profiling = peak_profiles,
-                                                   subtract_baseline = subtract_baseline,
-                                                   dtype=self.data.values.dtype)
-        include_columns = (self.data.values > 0).mean(axis = 0) > 1 - zero_threshold
-        self.data = self.data.iloc[:, include_columns]
+        data = find_cell_peaks(self.data, self.ref_mz, baseline_filter=baseline_filter, baseline_filter_size=baseline_filter_size, 
+                               cell_snr=cell_snr, peak_snr=peak_snr, max_zero_frac=max_zero_frac, **kwargs)
+        emit("find_cells", signal = self.data, baseline = data["baseline"], cell_idx = data["peak_frames"])
+        self.data, self.peak_meta = (data["cell_df"], 
+            pd.DataFrame(self.peak_meta.iloc[data["peak_frames"], :], index=self.peak_meta.index[data["peak_frames"]]))
         self.file_meta['length'] = self.data.shape[0]
-        self._process_flag = True
         return self
             
     def impute(self, method:str = 'knn', missing_values = 0, **kwargs):
@@ -213,7 +213,7 @@ class CyESIData:
         return self
                     
     def normalize(self, method:str = "total", **norm_kwargs):
-        logging.info(f"Run normalization on {self.get_name()}, method:{method}")
+        logging.info(f"Run normalization on {self.file_meta['name']}, method:{method}")
         self.data = pd.DataFrame(
             normalize(self.data.values, method, norm_kwargs),
             columns = self.data.columns,
@@ -232,6 +232,7 @@ class CyESIData:
     def save(self, root_path:str):
         dir_name = os.path.join(root_path, self.file_meta["name"])
         os.mkdir(dir_name)
+        logging.info(f"Saving processed data to {dir_name}...")
         with open(os.path.join(dir_name, ".meta"), 'w') as fp:
             file_meta = json.dump(self.file_meta, fp)
         self.data.to_csv(os.path.join(dir_name, "data.csv"))
@@ -239,20 +240,19 @@ class CyESIData:
         
     def to_anndata(self):
         obs_df = pd.DataFrame({
-            "rt": self.peak_meta["rt"],
-            "time": self.peak_meta["time"],
-            "width": self.peak_meta["width"],
-            "symmetry": self.peak_meta["symmetry"]
+            "cell_id": self.peak_meta.index,
         })
+        for col in self.peak_meta.columns:
+            obs_df[col] = self.peak_meta[col].values
         
         var_df = pd.DataFrame({
-            "mz": data.data.columns
+            "mz": self.data.columns
         })
         
         adata = AnnData(
-            X=data.data.values,
+            X=self.data.values,
             obs=obs_df.set_index("cell_id"),
-            var=var_df.set_index("mz")
+            var=var_df
         )
         adata.raw = adata.copy()
         return adata

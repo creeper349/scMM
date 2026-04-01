@@ -1,48 +1,9 @@
+"nohup python -m scMM.debug > output.log 2>&1 &"
+
 from .file.data import CyESIData
-from .util.decorator import timer
-from .plot.msplot import plot_hook
-from .file.batch import align_batch
-import numpy as np
-
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level = logging.INFO)
 
-@timer
-def run():
-    data = CyESIData("/home/zby/scMM/file/raw/2.mzML", ref_mz=734.5929, dtype=np.float32)
-    data.preprocess(debug_hook=plot_hook).impute('knn')
-    data.save("/home/zby/scMM/file/result/")
-    
-@timer
-def concat():
-    align_batch("/home/zby/scMM/data/algea-0313/results", "/home/zby/scMM/data/algea-0313/aligned", base = "1747")
-    
-if __name__=="__main__":
-    concat()
-    """
-    from .plot.embedding import dimension_reduction
-    import matplotlib.pyplot as plt
-    data = CyESIData.load_from_processed("/home/zby/scMM/file/concat/1709-add", dtype=np.float32).normalize("quantile")
-    dimension_reduction(data, method = "umap", color = data[832.3437], reduce_kwargs={"n_neighbors": 80}, plot_kwargs = {"s": 2, "palette": "tab20"})
-    plt.savefig(f"umap_label_quantile_832.svg")
-    """
-    """
-    from .plot.trajectory import PseudotimeEngine
-    from .plot.mpl_style import *
-    data = CyESIData.load_from_processed("/home/zby/src/files/concat/1709-add", dtype=np.float32)
-    engine = (PseudotimeEngine.from_CyESIData(data, "/home/zby/src/files/result/fig")
-        .set_root_by_index(4226)
-        .normalize().use_layer("norm_total").normalize("log").use_layer("norm_log")
-        .build_graph(n_neighbors=15)
-        .decomposition("umap", color_key = "time", reduce_kwargs={"n_neighbors": 80})
-        .run_palantir(root_key="is_root", root_value = True).diffmap()
-        .plot_branches().save_adata("/home/zby/src/files/result/h2o2.hdf5"))
-    engine.adata.obs.to_csv("/home/zby/src/files/result/fig/palantir_obs.csv")"""
-    #run_traj(data, fig_path_dir = "/home/zby/scMM/file/result/fig", start_idx = 4158) #4443
-    """
-    from .plot.trajectory import PseudotimeEngine
-    from .plot.mpl_style import *
-    engine = PseudotimeEngine.from_adata("/home/zby/src/files/result/h2o2.hdf5", "/home/zby/src/files/result/fig")\
-        .plot_trend_clusters("2416").plot_trend_clusters("3899")\
-        .plot_trajectory("2416").plot_trajectory("3899").plot_trends(["734.5939", "767.47064", "732.5773"], heatmap=True)
-    print(engine.adata.var)"""
+data = CyESIData.load_from_filelist("/home/zby/scMM/data/3d-models/20260329-yz-0mM", ref_mz = 734.5929,
+                                    cell_snr = 5.0, peak_snr = 2.0)
+data.save("/home/zby/scMM/data/algea_results/0mM")

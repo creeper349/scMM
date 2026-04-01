@@ -1,172 +1,201 @@
 import numpy as np
 import pandas as pd
-from .denoise import _filter, peak_recon, r1_decomposition
-from scipy.ndimage import median_filter
-from typing import Optional, Literal
+import pyopenms as oms
+from .denoise import peak_recon, r1_decomposition
+from scipy.ndimage import median_filter, label
 from joblib import Parallel, delayed
 
-def peak_detection_recon(data:pd.DataFrame, 
-                         baseline_filter = median_filter, 
-                         baseline_filter_size:int = 10, 
-                         ref_mz: Optional[float] = None, 
-                         peak_lam:float = 0.5, 
-                         peak_sigma_min:float = 1e-3, 
-                         tau:float = 2.0,
-                         n_jobs:int = -1, 
-                         dtype=np.float64, 
-                         **kwargs):
-    """
-    Docstring for peak_detection_recon
-    
-    :param data: Description
-    :type data: pd.DataFrame
-    :param baseline_filter: Description
-    :param baseline_filter_size: Description
-    :type baseline_filter_size: int
-    :param ref_mz: Description
-    :type ref_mz: Optional[float]
-    :param peak_lam: Description
-    :type peak_lam: float
-    :param peak_sigma_min: Description
-    :type peak_sigma_min: float
-    :param peak_threshold: Description
-    :type peak_threshold: float
-    :param n_jobs: Description
-    :type n_jobs: int
-    :param dtype: Description
-    :param kwargs: Description
-    """
-    S = data.values.astype(dtype)
-    B = _filter(S, size=baseline_filter_size, filter=baseline_filter, **kwargs)
-    C, sigma = peak_recon(S, B, lam=peak_lam, sigma_min=peak_sigma_min, tau=tau, n_jobs=n_jobs, dtype=dtype)
-    peak_mask = (C > 0)
-    if ref_mz is not None:
-        ref_index = (np.abs(data.columns.astype(dtype) - ref_mz)).argmin()
-        cell_mask = (C[:, ref_index] > 0)
+def filter_spectrum(
+    spec: oms.MSSpectrum,
+    baseline_window: int = 101,
+    noise_window: int = 101,
+    baseline_quantile: float = 0.1,
+    snr_threshold: float = 3.0,
+    keep_negative: bool = False,
+    return_snr: bool = False,
+    baseline_stride: int = 10,  
+):
+    mz, intensity = spec.get_peaks()
+
+    mz = np.asarray(mz, dtype=np.float64)
+    intensity = np.asarray(intensity, dtype=np.float64)
+
+    if intensity.size == 0:
+        out_spec = oms.MSSpectrum()
+        out_spec.set_peaks((mz, intensity))
+        out_spec.setRT(spec.getRT())
+        out_spec.setMSLevel(spec.getMSLevel())
+        if return_snr:
+            return out_spec, np.array([], dtype=np.float64)
+        return out_spec
+
+    def _make_odd(k: int) -> int:
+        k = max(1, int(k))
+        return k if k % 2 == 1 else k + 1
+
+    baseline_window = _make_odd(baseline_window)
+    noise_window = _make_odd(noise_window)
+    baseline_stride = max(1, int(baseline_stride))
+
+    n = intensity.size
+    eps = 1e-12
+
+    if baseline_stride == 1:
+        baseline = np.empty(n, dtype=np.float64)
+        hw_b = baseline_window // 2
+        for i in range(n):
+            left = max(0, i - hw_b)
+            right = min(n, i + hw_b + 1)
+            baseline[i] = np.quantile(intensity[left:right], baseline_quantile)
     else:
-        a, b = r1_decomposition(C, dtype=dtype)
-        cell_mask = (a > 0)
-    return cell_mask, peak_mask, C, B, sigma, (a, b) if ref_mz is None else None
+        anchor_idx = np.arange(0, n, baseline_stride, dtype=np.int64)
+        if anchor_idx[-1] != n - 1:
+            anchor_idx = np.append(anchor_idx, n - 1)
 
-def _cell_mask_compute(cell_mask:np.ndarray, peak_mask:np.ndarray):
-    combined_mask = peak_mask & cell_mask.reshape(-1, 1)
-    return combined_mask
+        anchor_baseline = np.empty(anchor_idx.size, dtype=np.float64)
+        hw_b = baseline_window // 2
 
-def _find_peaks(cell_mask:np.ndarray):
-    mask_int = cell_mask.astype(np.int8)
-    d = np.diff(mask_int, prepend=0, append=0)
+        for j, i in enumerate(anchor_idx):
+            left = max(0, i - hw_b)
+            right = min(n, i + hw_b + 1)
+            anchor_baseline[j] = np.quantile(intensity[left:right], baseline_quantile)
 
-    starts = np.where(d == 1)[0]
-    ends   = np.where(d == -1)[0] - 1 
-    return list(zip(starts, ends))
+        baseline = np.interp(
+            np.arange(n, dtype=np.float64),
+            anchor_idx.astype(np.float64),
+            anchor_baseline
+        )
 
-def _peak_pooling(data:np.ndarray, cell_peaks: list[tuple[int, int]], peak_mask:np.ndarray, method:Literal['max', 'integration'] = 'max', dtype = np.float64):
-    pooled_values = np.empty(len(cell_peaks), dtype=dtype)
-    for i, (start, end) in enumerate(cell_peaks):
-        if (peak_mask[start:end + 1] == 0).all():
-            pooled_values[i] = 0.0
-            continue
-        if method == 'integration':
-            pooled_values[i] = np.sum(data[start:end + 1], dtype=dtype)
-        elif method == 'max':
-            pooled_values[i] = np.max(data[start:end + 1])
-    return pooled_values
+    residual = intensity - baseline
+    noise = np.empty(n, dtype=np.float64)
+    hw_n = noise_window // 2
 
-def _peak_width(peaks:list[tuple[int, int]], time: np.ndarray = None, dtype = np.float64):
-    peak_width = np.empty(len(peaks), dtype=dtype)
-    for i, (start, end) in enumerate(peaks):
-        if time is not None:
-            widths = time[min(end + 1, len(time) - 1)] - time[max(start - 1, 0)]
+    for i in range(n):
+        left = max(0, i - hw_n)
+        right = min(n, i + hw_n + 1)
+        local_res = residual[left:right]
+
+        med = np.median(local_res)
+        mad = np.median(np.abs(local_res - med))
+        sigma = 1.4826 * mad
+        noise[i] = max(sigma, eps)
+
+    signal = residual.copy()
+    if not keep_negative:
+        signal[signal < 0] = 0.0
+
+    snr = signal / noise
+
+    filtered = signal.copy()
+    filtered[snr < snr_threshold] = 0.0
+
+    out_spec = oms.MSSpectrum()
+    out_spec.set_peaks((mz, filtered))
+    out_spec.setRT(spec.getRT())
+    out_spec.setMSLevel(spec.getMSLevel())
+
+    try:
+        out_spec.setName(spec.getName())
+    except Exception:
+        pass
+
+    try:
+        out_spec.setDriftTime(spec.getDriftTime())
+    except Exception:
+        pass
+
+    if return_snr:
+        return out_spec, snr
+    return out_spec
+
+def _filter(data:np.ndarray, size:int = 10, filter = median_filter, **filter_kwargs):
+    return filter(data, size = (size, 1), **filter_kwargs)
+
+def find_cell_peaks(data: pd.DataFrame, ref_mz: float, baseline_filter=median_filter, baseline_filter_size: int = 15,
+                    cell_snr: float = 5.0, peak_snr: float = 3.0, dtype=np.float64, baseline_stat="median",
+                    max_zero_frac: float = 0.9, n_jobs: int = -1, **kwargs):
+    
+    X = data.values.astype(dtype)
+    mz_values = data.columns.astype(dtype)
+    B = _filter(X, size=baseline_filter_size, filter=baseline_filter, **kwargs)
+    ref_idx = np.abs(mz_values - ref_mz).argmin()
+
+    ref_signal = X[:, ref_idx]
+    ref_baseline = B[:, ref_idx]
+    cell_mask = ref_signal > cell_snr * ref_baseline
+
+    labeled_mask, n_cells = label(cell_mask.astype(np.int8))
+
+    if n_cells == 0:
+        empty_df = pd.DataFrame(columns=data.columns)
+        return {
+            "cell_df": empty_df,
+            "cell_mask": cell_mask,
+            "labeled_mask": labeled_mask,
+            "baseline": B,
+            "ref_idx": ref_idx,
+            "ref_mz_matched": data.columns[ref_idx],
+            "peak_frames": np.array([], dtype=int),
+            "window_ranges": [],
+            "zero_frac": pd.Series(index=data.columns, data=np.nan),
+            "kept_columns": pd.Series(index=data.columns, data=False),
+        }
+
+    def _process_one_label(lab):
+        idx = np.where(labeled_mask == lab)[0]
+        if len(idx) == 0:
+            return None
+
+        X_win = X[idx, :]
+        B_win = B[idx, :]
+
+        feat_max = X_win.max(axis=0)
+
+        if baseline_stat == "max":
+            feat_baseline = B_win.max(axis=0)
+        elif baseline_stat == "mean":
+            feat_baseline = B_win.mean(axis=0)
+        elif baseline_stat == "median":
+            feat_baseline = np.median(B_win, axis=0)
         else:
-            widths = end - start + 2
-        peak_width[i] = widths
-    return peak_width
+            raise ValueError("baseline_stat must be one of: 'max', 'mean', 'median'")
 
-def _peak_symmetry(data:pd.Series, peaks:list[tuple[int, int]], dtype = np.float64):
-    sym = np.empty(len(peaks), dtype=dtype)
-    for i, (start, end) in enumerate(peaks):
-        peak_data = data.values[start:end + 1].astype(dtype)
-        if peak_data.size == 0:
-            sym[i] = 0.0
-            continue
-        mid = peak_data.argmax()
+        valid = feat_max > peak_snr * feat_baseline
+        feat_out = np.where(valid, feat_max, 0)
 
-        left_area  = np.sum(peak_data[:mid + 1], dtype=dtype)
-        right_area = np.sum(peak_data[mid:],     dtype=dtype)
+        local_ref = ref_signal[idx]
+        peak_frame = idx[np.argmax(local_ref)]
+        window_range = (idx[0], idx[-1])
 
-        denom = max(left_area, right_area)
-        sym[i] = min(left_area, right_area) / denom if denom > 0 else 0.0
-    return np.array(sym, dtype=dtype)
+        return feat_out, peak_frame, window_range
 
-def _peak_rt(data:pd.Series, peaks:list[tuple[int, int]], time: np.ndarray = None, dtype = np.float64):
-    peak_rt = np.empty(len(peaks), dtype=dtype)
-    for i, (start, end) in enumerate(peaks):
-        peak_data = data.values[start:end + 1].astype(dtype)
-        mid = peak_data.argmax()
-        if time is not None:
-            peak_rt[i] = time[start + mid]
-        else:
-            peak_rt[i] = start + mid
-    return peak_rt
-
-def peak_profiling(signal:pd.DataFrame, 
-                   baseline: np.ndarray,
-                   cell_mask:np.ndarray, 
-                   peak_mask:np.ndarray, 
-                   ref_mz: Optional[float] = None,
-                   C: Optional[np.ndarray] = None,
-                   pooling:Literal['max', 'integration'] = 'max',
-                   profiling: list = ['rt', 'width', 'symmetry'],
-                   time: Optional[np.ndarray] = None,
-                   n_jobs:int = -1,
-                   subtract_baseline: bool = False,
-                   dtype = np.float64):
-    if (ref_mz is None) and (C is None):
-        raise ValueError("Either ref_mz or C must be provided for peak profiling.")
-    signal_denoise = pd.DataFrame(
-        (signal.values.astype(dtype) - baseline.astype(dtype)) if subtract_baseline\
-        else signal.values.astype(dtype),
-        index=signal.index,
-        columns=signal.columns,
-        dtype=dtype
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_process_one_label)(lab) for lab in range(1, n_cells + 1)
     )
-    cell_peaks = _find_peaks(cell_mask)
-    combined_mask = _cell_mask_compute(cell_mask, peak_mask)
-    _peaks_pooled = Parallel(n_jobs=n_jobs)(
-        delayed(_peak_pooling)(
-            signal_denoise.values[:, i],
-            cell_peaks,
-            combined_mask[:, i],
-            method=pooling,
-            dtype=dtype
-        ) for i in range(signal_denoise.shape[1])
-    )
-    peaks_pooled = pd.DataFrame(
-        np.concatenate([p[:, np.newaxis] for p in _peaks_pooled], axis=1),
-        columns=signal_denoise.columns,
-        dtype=dtype
-    )
-    if ref_mz is not None:
-        ref_index = (np.abs(signal_denoise.columns.astype(dtype) - ref_mz)).argmin()
-    peaks_profiling = pd.DataFrame(index=peaks_pooled.index, dtype=dtype)
-    if 'rt' in profiling:
-        _peak_rts = _peak_rt(signal_denoise.iloc[:, ref_index], 
-                             _find_peaks(combined_mask[:, ref_index]), 
-                             time=time, dtype=dtype) if ref_mz is not None else _peak_rt(
-            C[:, ref_index], 
-            _find_peaks(combined_mask[:, ref_index]), 
-            time=time, dtype=dtype)
-        peaks_profiling['rt'] = _peak_rts
-    if 'width' in profiling:
-        _peak_widths = _peak_width(_find_peaks(combined_mask[:, ref_index]), 
-                                   time=time, dtype=dtype) if ref_mz is not None else _peak_width(
-                                    _find_peaks(combined_mask[:, ref_index]), 
-                                    time=time, dtype=dtype)
-        peaks_profiling['width'] = _peak_widths
-    if 'symmetry' in profiling:
-        _peak_symmetries = _peak_symmetry(signal_denoise.iloc[:, ref_index], 
-                                          _find_peaks(combined_mask[:, ref_index]), dtype=dtype) if ref_mz is not None else _peak_symmetry(pd.Series(
-            C[:, ref_index]), 
-            _find_peaks(combined_mask[:, ref_index]), dtype=dtype)
-        peaks_profiling['symmetry'] = _peak_symmetries
-    return peaks_pooled, peaks_profiling
+
+    results = [r for r in results if r is not None]
+
+    cell_rows = [r[0] for r in results]
+    peak_frames = [r[1] for r in results]
+    window_ranges = [r[2] for r in results]
+
+    cell_matrix = np.vstack(cell_rows)
+    cell_index = list(range(cell_matrix.shape[0]))
+    cell_df = pd.DataFrame(cell_matrix, index=cell_index, columns=data.columns)
+
+    zero_frac = (cell_df == 0).mean(axis=0)
+    keep_cols = zero_frac <= max_zero_frac
+    cell_df = cell_df.loc[:, keep_cols]
+
+    return {
+        "cell_df": cell_df,
+        "cell_mask": cell_mask,
+        "labeled_mask": labeled_mask,
+        "baseline": B,
+        "ref_idx": ref_idx,
+        "ref_mz_matched": data.columns[ref_idx],
+        "peak_frames": np.array(peak_frames, dtype=int),
+        "window_ranges": window_ranges,
+        "zero_frac": zero_frac,
+        "kept_columns": keep_cols,
+    }

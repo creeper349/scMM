@@ -4,7 +4,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import os
+import pickle
 from typing import Optional, Tuple
+from matplotlib.ticker import AutoMinorLocator
 
 def eic(ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time: Optional[pd.Series] = None) -> plt.Axes:
    
@@ -43,35 +46,22 @@ def plot_ms(ax: plt.Axes,
     return ax
 
 def plot_hook(stage, data):
-    if (stage == "peak_detection") or (stage == "denoised_signal"):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        eic_ax, eic_data = eic(ax, data["data"], data["ref_mz"], ppm_tol=5.0)
-        eic_ax = _plot_cells(eic_ax, data["cell_mask"], eic_data)
-        eic_ax.set_title("EIC with Detected Cells")
-        plt.savefig(f"debug_{stage}.svg")
+    if stage == "find_cells":
+        fig, ax = plt.subplots(figsize=(10, 4))
+        plot_ms(ax, data["signal"], frame_range=(data["cell_idx"][0] - 50, data["cell_idx"][-1] + 50))
+        _plot_cells(ax, data["cell_mask"], (data["baseline"][data["cell_idx"]], data["signal"].iloc[data["cell_idx"], :].sum(axis=1)))
+        plt.savefig(f".tmp/{stage}.svg", bbox_inches="tight")
         plt.close(fig)
-    elif stage == "cell_signal":
-        C = data["C"]
-        ref_index = (np.abs(data["data"].columns.astype(np.float64) - data["ref_mz"])).argmin()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(data["data"].index, C[:, ref_index], label="Cell Signal at ref m/z")
-        ax.set_xlabel("Scan Index")
-        ax.set_ylabel("Intensity")
-        plt.savefig(f"debug_{stage}.svg")
-        plt.close(fig)
-    elif stage == "r1":
-        r1 = data["r1"]
-        if r1 is not None:
-            a, b = r1
-            fig, ax = plt.subplots(2, 1, figsize=(10, 6))
-            ax[0].plot(a)
-            ax[0].set_xlabel("Index")
-            ax[0].set_ylabel("Time loadings")
-            ax[1].plot(b)
-            ax[1].set_xlabel("Index")
-            ax[1].set_ylabel("m/z loadings")
-            plt.savefig(f"debug_{stage}.svg")
-            plt.close(fig)
+            
+def save_hook(stage, data):
+    if not os.path.exists(".tmp"):
+        os.mkdir(".tmp")
+    save_dict = {
+        "stage": stage,
+        "data": dict(data)
+    }
+    with open(f".tmp/{stage}.pkl", "wb") as fp:
+        pickle.dump(save_dict, fp)
 
 def plot_spectrum(
         spec,
@@ -113,17 +103,18 @@ def plot_spectrum(
         fig = ax.figure
 
     ax.plot(mz, inten, linewidth=linewidth, color = kwargs.get("color", "black"))
-
+    ax.set_xlim(mz_range if mz_range is not None else (np.min(mz), np.max(mz)))
     ax.set_xlabel("m/z")
     ax.set_ylabel("Relative Intensity" if normalize else "Intensity")
+    ax.xaxis.set_minor_locator(AutoMinorLocator(10))
 
-    if title is None:
-        ms_level = spec.getMSLevel() if hasattr(spec, "getMSLevel") else None
-        title = f"MS{ms_level} Spectrum" if ms_level else "Spectrum"
-    ax.set_title(title)
+    if title is not None:
+        ax.set_title(title)
 
     if intensity_range is not None:
         ax.set_ylim(*intensity_range)
+    else:
+        ax.set_ylim(0, np.max(inten) * 1.05)
 
     if top_n_labels and top_n_labels > 0:
         idx_sorted = np.argsort(inten)[::-1]
@@ -162,7 +153,7 @@ def plot_spectrum(
     ax.margins(x=0.01)
 
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        fig.savefig(save_path, bbox_inches="tight")
 
     if created_fig:
         plt.show()
