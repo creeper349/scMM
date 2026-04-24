@@ -274,12 +274,7 @@ class PlotEngine:
             
             feature_names = self.adata.uns["metabolite_trends"]["feature_names"]
             qval, rho = self.adata.uns["metabolite_trends"]["qval"], self.adata.uns["metabolite_trends"]["rho"]
-            ylabels = [
-                f"{feature_names[j]}  q={qval[j]:.2e}, rho={rho[j]:.2f}"
-                if np.isfinite(qval[j]) and np.isfinite(rho[j])
-                else f"{feature_names[j]}"
-                for j in top_idx
-            ]
+            ylabels = [feature_names[j] for j in top_idx]
 
             plt.yticks(np.arange(len(top_idx)), ylabels)
             plt.xticks(

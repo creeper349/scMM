@@ -84,6 +84,7 @@ class CyESIData:
         mz_list, _ = extract_peaks(sum_, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance)
         obj.data, obj.peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
         obj.peak_meta["time"] = obj.peak_meta["rt"] / np.max(obj.peak_meta["rt"])
+        obj.peak_meta["label"] = [obj.file_meta["name"].split(".")[0]] * len(obj.peak_meta)
         obj.ref_mz = ref_mz
         obj.preprocess(**preprocess_kwds)
         return obj
@@ -144,7 +145,7 @@ class CyESIData:
                 data = data.copy()
                 peak_meta["time"] = (peak_meta["rt"] + file_meta["timestamp"] - timestamp_start
                                      ) / (timestamp_end - timestamp_start)
-
+                peak_meta["label"] = [file_meta["name"].split(".")[0]] * len(peak_meta)
                 if obj.data is None:
                     obj.data = data
                 else:
@@ -219,6 +220,55 @@ class CyESIData:
             columns = self.data.columns,
             dtype = self.data.values.dtype
         )
+        return self
+    
+    def alignwith(self, other:Self, ppm_tol:float = 5.0, mz_merge_options: Literal["union", "ref"] = "union"):
+        
+        df1, df2 = self.data, other.data
+        mz1, mz2 = df1.columns.values.astype(self.data.values.dtype), df2.columns.values.astype(self.data.values.dtype)
+        idx2_aligned = np.full(len(mz1), -1, dtype=int)
+
+        j = 0
+        for i, m in enumerate(mz1):
+            while j < len(mz2) and mz2[j] < m * (1 - ppm_tol * 1e-6):
+                j += 1
+            if j < len(mz2) and abs(mz2[j] - m) / m * 1e6 <= ppm_tol:
+                idx2_aligned[i] = j
+
+        keep = idx2_aligned >= 0
+        mz_aligned = df1.columns[keep]
+        df1_aligned = df1.loc[:, mz_aligned]
+        df2_aligned = df2.iloc[:, idx2_aligned[keep]]
+        df2_aligned.columns = mz_aligned
+
+        merged_df = pd.concat([df1_aligned, df2_aligned], axis=0, ignore_index=True)
+
+        if mz_merge_options == "union":
+            mask_new = np.ones(len(mz2), dtype=bool)
+            mask_new[idx2_aligned[keep]] = False
+            new_mz = mz2[mask_new]
+            if len(new_mz) > 0:
+                df2_new = df2.loc[:, new_mz].copy()
+                df2_new[:] = 0
+                merged_df = pd.concat([merged_df, df2_new], axis=1)
+                
+        self.data = merged_df
+        self.peak_meta = pd.concat([self.peak_meta, other.peak_meta], axis = 0, ignore_index=True)
+        if not self._concat_flag:
+            self.file_meta = [self.file_meta]
+        per_file_meta = []
+        if "per_file_meta" in self.file_meta:
+            if "per_file_meta" not in other.file_meta:
+                per_file_meta.append(other.file_meta)
+            else:
+                per_file_meta.extend(other.file_meta.get("per_file_meta", []))
+        else:
+            per_file_meta = [self.file_meta, other.file_meta]
+        self.file_meta = {
+            "name": f"{self.file_meta['name']}+{other.file_meta['name']}",
+            "per_file_meta": per_file_meta
+        }
+
         return self
     
     def __len__(self):
