@@ -230,7 +230,6 @@ class PlotEngine:
         kernel_stat: str = "median",
         feature_name_key: Optional[str] = None,
         plot_top_n: Optional[int] = None,
-        metabolite_lists: list = None,
         cmap: str = "viridis",
         **kwargs
     ):
@@ -242,17 +241,20 @@ class PlotEngine:
             kernel_stat=kernel_stat,
             feature_name_key=feature_name_key
         )
-        if (plot_top_n is not None) or (metabolite_lists is not None):
-            rank_idx = self.adata.uns["metabolite_trends"]["rank_idx"]
-            if metabolite_lists is not None:
-                top_idx = []
-                for metabolite in metabolite_lists:
-                    if metabolite in self.adata.var[feature_name_key].values:
-                        top_idx.append(np.where(self.adata.var[feature_name_key].values == metabolite)[0][0])
-            else:
-                top_idx = rank_idx[:min(plot_top_n, self.adata.X.shape[1])]
 
-            M = self.adata.uns["metabolite_trends"]["pooled"][:, top_idx].T  # shape = (top_n, n_windows)
+        if plot_top_n is not None:
+            rank_idx = self.adata.uns["metabolite_trends"]["rank_idx"]
+
+            # remove features with empty feature_name_key
+            if feature_name_key is not None:
+                feature_values = self.adata.var[feature_name_key]
+                valid_mask = feature_values.notna() & (feature_values.astype(str).str.strip() != "")
+                valid_idx = set(np.where(valid_mask.values)[0])
+                rank_idx = [idx for idx in rank_idx if idx in valid_idx]
+
+            top_idx = rank_idx[:min(plot_top_n, len(rank_idx))]
+
+            M = self.adata.uns["metabolite_trends"]["pooled"][:, top_idx].T
 
             # row-wise z-score for visualization
             M_plot = M.copy()
@@ -271,7 +273,7 @@ class PlotEngine:
                 interpolation="nearest",
                 cmap=cmap,
             )
-            
+
             feature_names = self.adata.uns["metabolite_trends"]["feature_names"]
             qval, rho = self.adata.uns["metabolite_trends"]["qval"], self.adata.uns["metabolite_trends"]["rho"]
             ylabels = [feature_names[j] for j in top_idx]
@@ -282,9 +284,8 @@ class PlotEngine:
                 [f"{x:.2f}" if np.isfinite(x) else "" for x in self.adata.uns["metabolite_trends"]["time_centers"]],
                 rotation=90
             )
-            plt.xlabel(parameterization_key)
-            plt.ylabel("Metabolite")
-            plt.title(f"Top {len(top_idx)} metabolite trends ({kernel_stat} pooling)")
+            plt.xlabel(kwargs.get("xlabel", parameterization_key))
+            plt.ylabel(kwargs.get("ylabel", "Metabolite"))
             plt.colorbar(im, label="Row-wise z-scored pooled intensity")
             plt.tight_layout()
             plt.savefig(f"{self.path}/metabolite_trends_top{len(top_idx)}.svg", bbox_inches="tight")
@@ -317,8 +318,8 @@ class PlotEngine:
             for j in cluster_idx[0]:
                 ax[i].plot(self.adata.uns["metabolite_trends"]["time_centers"], trends.T[j], color="gray", alpha=0.5, linewidth=0.5)
             ax[i].set_title(f"Cluster {label} (n={cluster_trends.shape[0]})")
-            ax[i].set_xlabel("Time")
-            ax[i].set_ylabel("z-scored intensity")
+            ax[i].set_xlabel(kwargs.get("xlabel", "Time"))
+            ax[i].set_ylabel(kwargs.get("ylabel", "Relative intensity"))
 
         plt.tight_layout()
         plt.savefig(f"{self.path}/trend_clusters_{cluster_method}_{metric}.svg", bbox_inches="tight")
@@ -446,3 +447,57 @@ class PlotEngine:
         plt.tight_layout()
         plt.savefig(f"{self.path}/{method}_{key_added}_umap.svg", bbox_inches="tight")
         plt.close(fig)
+        
+    def feature_network(self, name_key: str = None, class_key: str = None,
+                    metric: str = "pearson", **kwargs):
+        if name_key is not None and name_key in self.adata.var.columns:
+            feature_names = self.adata.var[name_key].values
+
+            nan_mask = pd.isna(feature_names) | (
+                pd.Series(feature_names).astype(str).str.strip() == ""
+            ).values
+
+            feature_names[nan_mask] = [f"feature_{i}" for i in np.where(nan_mask)[0]]
+            feature_arr = self.adata.X[:, ~nan_mask]
+            feature_names = feature_names[~nan_mask]
+        else:
+            feature_names = np.array([f"feature_{i}" for i in range(self.adata.n_vars)])
+            feature_arr = self.adata.X
+            
+        if metric == "pearson":
+            corr_matrix = np.corrcoef(feature_arr.T)
+            np.fill_diagonal(corr_matrix, 1)
+            dist = np.sqrt(2 * (1 - np.abs(corr_matrix)))
+        elif metric == "euclidean":
+            from sklearn.metrics import pairwise_distances
+            corr_matrix = pairwise_distances(feature_arr.T, metric="euclidean")
+
+        feature_emb = umap.UMAP(
+            metric="precomputed",
+            n_neighbors=kwargs.get("n_neighbors", 15),
+            min_dist=kwargs.get("min_dist", 0.1)
+        ).fit_transform(dist)
+
+        if np.issubdtype(np.array(feature_names).dtype, np.number):
+            colors = feature_names.astype(float)
+            cmap = kwargs.get("cmap", "viridis")
+        else:
+            if class_key is not None and class_key in self.adata.var.columns:
+                colors = self.adata.var.loc[~nan_mask, class_key].astype("category").cat.codes
+            else:
+                colors = np.zeros(len(feature_names))
+
+            cmap = kwargs.get("cmap", "tab20")
+
+        plt.figure(figsize=kwargs.get("figsize", (6, 6)))
+        plt.scatter(feature_emb[:, 0], feature_emb[:, 1],
+                    s=10, c=colors, cmap=cmap)
+
+        for i in range(feature_emb.shape[0]):
+            plt.text(feature_emb[i, 0], feature_emb[i, 1],
+                    str(feature_names[i]), fontsize=kwargs.get("fontsize", 8), alpha=kwargs.get("alpha", 0.7))
+
+        plt.savefig(f"{self.path}/feature_network_{metric}.svg",
+                    bbox_inches="tight")
+        
+        return feature_emb

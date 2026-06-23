@@ -1,4 +1,5 @@
 import time
+import numpy as np
 from functools import wraps
 
 def timer(func):
