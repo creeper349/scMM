@@ -24,7 +24,9 @@ jobs:
       - name: Install project
         run: python -m pip install --no-deps -e .
       - name: Lint
-        run: ruff check .
+        run: |
+          ruff format --check .
+          ruff check .
       - name: Test
         run: pytest -W error
       - name: Build distributions

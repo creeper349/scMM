@@ -26,8 +26,9 @@ conda env update -f environment.yml --prune
 Run the complete local verification suite from the repository root:
 
 ```bash
+ruff format --check .
 ruff check .
-pytest
+pytest -W error
 python -m build
 ```
 
@@ -41,3 +42,22 @@ scmm-process raw-data/ results --ref-mz 734.5929 --jobs 4
 ```
 
 Use `scmm-process --help` for all preprocessing options.
+
+## Python API
+
+```python
+from scMM.file.data import CyESIData
+
+data = CyESIData.load_from_file(
+    "sample.mzML",
+    ref_mz=734.5929,
+    cell_snr=5.0,
+    peak_snr=3.0,
+)
+data.normalize("total")
+result_dir = data.save("results")
+```
+
+Processed datasets can be reopened with `CyESIData(result_dir)`. Saving writes
+both pickle files for faithful and efficient reloads and CSV files for
+inspection/interchange.

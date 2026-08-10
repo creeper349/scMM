@@ -13,7 +13,7 @@ from scipy.ndimage import median_filter
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import KNNImputer, SimpleImputer
 
-from ..util.annotation import DEFAULT_ADDUCTS_NEG, DEFAULT_ADDUCTS_POS, SDFMzSearcher
+from ..util.annotation import SDFMzSearcher
 from ..util.normalize import normalize
 from ..util.peak import filter_spectrum, find_cell_peaks
 from .io import (
@@ -27,6 +27,10 @@ from .io import (
 
 DebugHook = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
+
+
+def _zero_is_missing(values: np.ndarray) -> np.ndarray:
+    return values == 0
 
 
 def _align_frame_from_file(file_path: str, mz_list, ppm_tol: int = 10, dtype=np.float64):
@@ -104,7 +108,7 @@ class CyESIData:
     def load_from_file(
         cls,
         file_path: str | Path,
-        ref_mz: float | None = None,
+        ref_mz: float,
         dtype=np.float64,
         ppm_tol: int = 10,
         resolution: float = 35000,
@@ -114,7 +118,7 @@ class CyESIData:
         distance: int = 3,
         **preprocess_kwds,
     ):
-        if ref_mz is None or not np.isfinite(ref_mz) or ref_mz <= 0:
+        if not np.isfinite(ref_mz) or ref_mz <= 0:
             raise ValueError("ref_mz must be a positive finite number")
         obj = object.__new__(cls)
         exp, obj.file_meta = load_single_file(str(file_path), format="auto")
@@ -141,7 +145,7 @@ class CyESIData:
     def load_from_filelist(
         cls,
         dir_path: str | Path,
-        ref_mz: float | None = None,
+        ref_mz: float,
         dtype=np.float64,
         ppm_tol: int = 10,
         resolution: float = 35000,
@@ -152,7 +156,7 @@ class CyESIData:
         distance: int = 3,
         **preprocess_kwds,
     ):
-        if ref_mz is None or not np.isfinite(ref_mz) or ref_mz <= 0:
+        if not np.isfinite(ref_mz) or ref_mz <= 0:
             raise ValueError("ref_mz must be a positive finite number")
         directory = Path(dir_path).expanduser()
         if not directory.is_dir():
@@ -482,7 +486,7 @@ class CyESIData:
         carbon13_abundance: float = 0.0109,
         intensity_threshold: float = 0.0,
         safety_factor: float = 1.0,
-        missing_func=lambda x: x == 0,
+        missing_func: Callable[[np.ndarray], np.ndarray] = _zero_is_missing,
         merge_mode: str = "keep_parent",
         remove: bool = True,
         inplace: bool = True,
@@ -773,11 +777,11 @@ class CyESIData:
 
     def get_annotation(
         self,
-        sdf_path: str,
+        sdf_path: str | Path,
         ppm_tol: float,
         search_mode: Literal["pos", "neg", "both"] = "pos",
-        adducts_pos: dict = DEFAULT_ADDUCTS_POS,
-        adducts_neg: dict = DEFAULT_ADDUCTS_NEG,
+        adducts_pos: dict | None = None,
+        adducts_neg: dict | None = None,
         **kwargs,
     ):
         searcher = SDFMzSearcher(
