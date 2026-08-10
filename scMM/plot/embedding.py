@@ -3,7 +3,6 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE, Isomap, LocallyLinearEmbedding
-from umap import UMAP
 
 from ..file.data import CyESIData
 
@@ -12,6 +11,8 @@ DIM_REGISTRY = {}
 
 def register_dim(name):
     def wrapper(func):
+        if name in DIM_REGISTRY:
+            raise ValueError(f"Dimension reduction method already registered: {name}")
         DIM_REGISTRY[name] = func
         return func
 
@@ -20,6 +21,7 @@ def register_dim(name):
 
 @register_dim("umap")
 def run_umap(X, dim):
+    from umap import UMAP
 
     params = {
         "n_neighbors": 15,
@@ -77,6 +79,7 @@ def run_LLE(X, dim):
 
 
 def _run_dim_reduction(X, method, dim):
+    method = method.lower()
     if method not in DIM_REGISTRY:
         raise ValueError(f"Unknown method: {method}")
 
@@ -86,7 +89,7 @@ def _run_dim_reduction(X, method, dim):
 def dimension_reduction(
     data: CyESIData | np.ndarray,
     method: str = "pca",
-    ax: plt.Axes = None,
+    ax: plt.Axes | None = None,
     reduce_kwargs: dict | None = None,
     color: np.ndarray | str | None = "categorical",
     categorical_mapping: dict | None = None,
@@ -118,8 +121,13 @@ def dimension_reduction(
     """
     reduce_kwargs = reduce_kwargs or {}
     plot_kwargs = plot_kwargs or {}
-    X = data.data if isinstance(data, CyESIData) else data
+    X = np.asarray(data.data if isinstance(data, CyESIData) else data, dtype=float)
+    if X.ndim != 2 or 0 in X.shape:
+        raise ValueError("data must be a non-empty 2D matrix")
+    method = method.lower()
     emb = _run_dim_reduction(X, method, reduce_kwargs)
+    if emb.ndim != 2 or emb.shape[0] != X.shape[0] or emb.shape[1] < 2:
+        raise ValueError("Dimension reduction must return at least two components per observation")
 
     if ax is None:
         _fig, ax = plt.subplots(figsize=plot_kwargs.get("figsize", (6, 6)))
@@ -130,12 +138,22 @@ def dimension_reduction(
     alpha = plot_kwargs.get("alpha", 0.8)
     if isinstance(color, str):
         if color == "categorical":
+            if not isinstance(data, CyESIData):
+                raise TypeError("categorical coloring requires a CyESIData instance")
             classes = data.get_labels(categorical_mapping)
             classes = np.asarray(classes)
-        else:
+        elif color == "cluster":
             cluster_kwargs = cluster_kwargs or {}
-            classes = cluster_kwargs.get("method", DBSCAN)(**cluster_kwargs).fit_predict(X)
+            cluster_method = cluster_kwargs.pop("method", DBSCAN)
+            model = (
+                cluster_method(**cluster_kwargs)
+                if isinstance(cluster_method, type)
+                else cluster_method
+            )
+            classes = model.fit_predict(X)
             classes = np.asarray(classes)
+        else:
+            raise ValueError("color must be 'categorical', 'cluster', an array, or None")
 
         uniq = np.unique(classes)
         cmap = plt.get_cmap(plot_kwargs.get("palette", "tab10"))
@@ -148,6 +166,8 @@ def dimension_reduction(
             ax.legend(title=plot_kwargs.get("legend_title", "Class"), markerscale=2, frameon=False)
 
     elif isinstance(color, np.ndarray):
+        if color.ndim != 1 or len(color) != len(X):
+            raise ValueError("color array must have one value per observation")
         cmap = plot_kwargs.get("cmap", "viridis")
 
         sc = ax.scatter(

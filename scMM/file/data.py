@@ -114,6 +114,8 @@ class CyESIData:
         distance: int = 3,
         **preprocess_kwds,
     ):
+        if ref_mz is None or not np.isfinite(ref_mz) or ref_mz <= 0:
+            raise ValueError("ref_mz must be a positive finite number")
         obj = object.__new__(cls)
         exp, obj.file_meta = load_single_file(str(file_path), format="auto")
         sum_ = sum_spec(exp, resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
@@ -124,7 +126,8 @@ class CyESIData:
             sum_, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance
         )
         obj.data, obj.peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
-        obj.peak_meta["time"] = obj.peak_meta["rt"] / np.max(obj.peak_meta["rt"])
+        max_rt = float(obj.peak_meta["rt"].max())
+        obj.peak_meta["time"] = obj.peak_meta["rt"] / max_rt if max_rt > 0 else 0.0
         obj.peak_meta["label"] = [obj.file_meta["name"].split(".")[0]] * len(obj.peak_meta)
         obj.ref_mz = ref_mz
         obj.preprocess(**preprocess_kwds)
@@ -149,6 +152,8 @@ class CyESIData:
         distance: int = 3,
         **preprocess_kwds,
     ):
+        if ref_mz is None or not np.isfinite(ref_mz) or ref_mz <= 0:
+            raise ValueError("ref_mz must be a positive finite number")
         directory = Path(dir_path).expanduser()
         if not directory.is_dir():
             raise NotADirectoryError(directory)
@@ -255,6 +260,8 @@ class CyESIData:
         debug_hook: DebugHook | None = None,
         **kwargs,
     ):
+        if self.ref_mz is None or not np.isfinite(self.ref_mz) or self.ref_mz <= 0:
+            raise ValueError("A positive finite ref_mz is required for preprocessing")
 
         def emit(stage: str, **payload):
             if debug_hook is not None:
@@ -271,7 +278,11 @@ class CyESIData:
             **kwargs,
         )
         emit(
-            "find_cells", signal=self.data, baseline=data["baseline"], cell_idx=data["peak_frames"]
+            "find_cells",
+            signal=self.data,
+            baseline=data["baseline"],
+            cell_mask=data["cell_mask"],
+            cell_idx=data["peak_frames"],
         )
         self.data, self.peak_meta = (
             data["cell_df"],
@@ -288,6 +299,7 @@ class CyESIData:
         if method == "knn":
             imputer = KNNImputer(missing_values=missing_values, **kwargs)
         else:
+            kwargs.setdefault("keep_empty_features", True)
             imputer = SimpleImputer(missing_values=missing_values, strategy=method, **kwargs)
 
         self.data = pd.DataFrame(
@@ -399,6 +411,8 @@ class CyESIData:
         return self.data.shape[0]
 
     def __getitem__(self, key):
+        if self.data.shape[1] == 0:
+            raise KeyError("Dataset has no features")
         key = float(key)
         idx = (np.abs(self.data.columns.values.astype(float) - key)).argmin()
         return self.data.iloc[:, idx].values
@@ -473,7 +487,20 @@ class CyESIData:
         remove: bool = True,
         inplace: bool = True,
     ):
-
+        if self.data.shape[1] == 0:
+            raise ValueError("Cannot deisotope a dataset without features")
+        if isotope_diff <= 0:
+            raise ValueError("isotope_diff must be positive")
+        if ppm_tol < 0:
+            raise ValueError("ppm_tol must be non-negative")
+        if max_isotope_order < 1:
+            raise ValueError("max_isotope_order must be at least 1")
+        if not 0 <= r_square_threshold <= 1:
+            raise ValueError("r_square_threshold must be between 0 and 1")
+        if not 0 < carbon13_abundance < 1:
+            raise ValueError("carbon13_abundance must be between 0 and 1")
+        if safety_factor <= 0:
+            raise ValueError("safety_factor must be positive")
         if merge_mode not in {"keep_parent", "sum"}:
             raise ValueError("merge_mode must be either 'keep_parent' or 'sum'.")
 

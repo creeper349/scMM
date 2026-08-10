@@ -7,6 +7,29 @@ from scipy.stats import spearmanr
 from sklearn.cluster import AgglomerativeClustering, KMeans
 
 
+def _dense_matrix(adata: ad.AnnData) -> np.ndarray:
+    matrix = adata.X
+    if hasattr(matrix, "toarray"):
+        matrix = matrix.toarray()
+    matrix = np.asarray(matrix, dtype=float)
+    if matrix.ndim != 2:
+        raise ValueError("adata.X must be a 2D matrix")
+    return matrix
+
+
+def _window_starts(n_obs: int, window_size: int, step_size: int) -> list[int]:
+    if window_size < 1:
+        raise ValueError("window_size must be at least 1")
+    if step_size < 1:
+        raise ValueError("step_size must be at least 1")
+    effective_window = min(window_size, n_obs)
+    starts = list(range(0, max(1, n_obs - effective_window + 1), step_size)) or [0]
+    final_start = max(0, n_obs - effective_window)
+    if starts[-1] != final_start:
+        starts.append(final_start)
+    return starts
+
+
 def run_palantir(
     adata: ad.AnnData,
     start_idx: int,
@@ -20,10 +43,12 @@ def run_palantir(
     use_early_cell_as_start: bool = True,
     store_prefix: str = "palantir",
 ):
+    if adata.n_obs < 2 or adata.n_vars < 1:
+        raise ValueError("Palantir requires at least two observations and one feature")
     if not (0 <= start_idx < adata.n_obs):
         raise IndexError(f"start_idx out of range: {start_idx}")
 
-    data_df = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names)
+    data_df = pd.DataFrame(_dense_matrix(adata), index=adata.obs_names, columns=adata.var_names)
     internal_index = data_df.index
     early_cell = internal_index[start_idx]
 
@@ -127,31 +152,42 @@ def resample_trajectory(
     min_cells_per_window: int = 5,
     **kwargs,
 ):
+    if adata.n_obs < 1:
+        raise ValueError("Trajectory resampling requires at least one observation")
+    if cell_dist_key not in adata.obsm:
+        raise KeyError(f"{cell_dist_key} not found in adata.obsm")
+    if parameterization_key not in adata.obs:
+        raise KeyError(f"{parameterization_key} not found in adata.obs")
+    if min_cells_per_window < 1:
+        raise ValueError("min_cells_per_window must be at least 1")
     points = np.asarray(adata.obsm[cell_dist_key], dtype=float)
     time = np.asarray(adata.obs[parameterization_key].to_numpy(), dtype=float)
+    if points.ndim != 2 or points.shape[0] != adata.n_obs:
+        raise ValueError(f"{cell_dist_key} must be a 2D array with one row per observation")
+    if not np.isfinite(time).all():
+        raise ValueError(f"{parameterization_key} must contain only finite values")
 
     order = np.argsort(time)
     points_sorted = points[order]
     time_sorted = time[order]
 
-    n_traj_points = max(1, (len(adata) - window_size) // step_size + 1)
-    branch_prob = adata.obsm.get(branch_prob_key, None)
+    branch_prob = adata.obsm.get(branch_prob_key)
     if branch_prob is not None:
         branch_prob = np.asarray(branch_prob, dtype=float)
-        if branch_prob.shape[0] != adata.n_obs:
-            raise ValueError(f"{branch_prob_key} row number does not match n_obs")
+        if branch_prob.ndim == 1:
+            branch_prob = branch_prob[:, None]
+        if branch_prob.ndim != 2 or branch_prob.shape[0] != adata.n_obs:
+            raise ValueError(f"{branch_prob_key} must have one row per observation")
+        if np.any(branch_prob[np.isfinite(branch_prob)] < 0):
+            raise ValueError(f"{branch_prob_key} cannot contain negative probabilities")
         branch_prob_sorted = branch_prob[order]
         n_branches = branch_prob_sorted.shape[1]
     else:
         branch_prob_sorted = np.ones((adata.n_obs, 1), dtype=float)
         n_branches = 1
 
-    starts = list(range(0, max(1, adata.n_obs - window_size + 1), step_size))
-    if len(starts) == 0:
-        starts = [0]
-    if starts[-1] + window_size < adata.n_obs:
-        starts.append(max(0, adata.n_obs - window_size))
-
+    starts = _window_starts(adata.n_obs, window_size, step_size)
+    effective_window = min(window_size, adata.n_obs)
     n_traj_points = len(starts)
 
     traj_points = np.full((n_branches, n_traj_points, points.shape[1]), np.nan, dtype=float)
@@ -161,7 +197,7 @@ def resample_trajectory(
     traj_weight_sum = np.full((n_branches, n_traj_points), np.nan, dtype=float)
 
     for i, start in enumerate(starts):
-        end = min(start + window_size, adata.n_obs)
+        end = min(start + effective_window, adata.n_obs)
 
         window_points = points_sorted[start:end]
         window_time = time_sorted[start:end]
@@ -172,7 +208,9 @@ def resample_trajectory(
         for b in range(n_branches):
             w = window_bp[:, b].copy()
 
-            valid = np.isfinite(w)
+            valid = (
+                np.isfinite(w) & np.isfinite(window_time) & np.isfinite(window_points).all(axis=1)
+            )
             if valid.sum() < min_cells_per_window:
                 continue
 
@@ -193,6 +231,14 @@ def resample_trajectory(
             traj_counts[b, i] = valid.sum()
 
     adata.uns[store_key] = traj_points
+    adata.uns[f"{store_key}_metadata"] = {
+        "time": traj_time,
+        "counts": traj_counts,
+        "weight_sum": traj_weight_sum,
+        "window_starts": np.asarray(starts, dtype=int),
+        "window_size": int(effective_window),
+        "step_size": int(step_size),
+    }
     return adata
 
 
@@ -205,16 +251,15 @@ def metabolic_velocity_field(
     if parameterization_key not in adata.obs:
         raise KeyError(f"{parameterization_key} not found in adata.obs")
 
-    X = adata.X
-    if hasattr(X, "toarray"):
-        X = X.toarray()
-    X = np.asarray(X, dtype=float)
+    X = _dense_matrix(adata)
 
     t = np.asarray(adata.obs[parameterization_key].to_numpy(), dtype=float)
 
     n_obs, n_feat = X.shape
     if n_obs < 2:
         raise ValueError("Need at least 2 observations to compute velocity")
+    if not np.isfinite(t).all() or not np.isfinite(X).all():
+        raise ValueError("Data and parameterization values must be finite")
 
     if window_size < 2:
         raise ValueError("window_size must be >= 2")
@@ -225,11 +270,8 @@ def metabolic_velocity_field(
     X_sorted = X[order]
     t_sorted = t[order]
 
-    starts = list(range(0, max(1, n_obs - window_size + 1), step_size))
-    if len(starts) == 0:
-        starts = [0]
-    if starts[-1] + window_size < n_obs:
-        starts.append(max(0, n_obs - window_size))
+    starts = _window_starts(n_obs, window_size, step_size)
+    effective_window = min(window_size, n_obs)
 
     n_windows = len(starts)
 
@@ -240,7 +282,7 @@ def metabolic_velocity_field(
     counts = np.zeros(n_windows, dtype=int)
 
     for i, start in enumerate(starts):
-        end = min(start + window_size, n_obs)
+        end = min(start + effective_window, n_obs)
 
         Xw = X_sorted[start:end]  # (k, m)
         tw = t_sorted[start:end]  # (k,)
@@ -266,7 +308,14 @@ def metabolic_velocity_field(
         speeds[i] = np.linalg.norm(drdt)
         counts[i] = k
 
-    result = {"velocity_field": velocity_vectors, "speeds": speeds, "time_centers": time_centers}
+    result = {
+        "state_centers": state_centers,
+        "velocity_field": velocity_vectors,
+        "speeds": speeds,
+        "time_centers": time_centers,
+        "counts": counts,
+        "window_starts": np.asarray(starts, dtype=int),
+    }
     adata.uns["metabolic_velocity"] = result
     return adata
 
@@ -283,16 +332,15 @@ def metabolite_trends(
     if parameterization_key not in adata.obs:
         raise KeyError(f"{parameterization_key} not found in adata.obs")
 
-    X = adata.X
-    if hasattr(X, "toarray"):
-        X = X.toarray()
-    X = np.asarray(X, dtype=float)
+    X = _dense_matrix(adata)
 
     t = np.asarray(adata.obs[parameterization_key].to_numpy(), dtype=float)
 
     n_obs, n_feat = X.shape
     if n_obs < 2:
         raise ValueError("Need at least 2 observations")
+    if not np.isfinite(t).all():
+        raise ValueError(f"{parameterization_key} must contain only finite values")
     if window_size < 1:
         raise ValueError("window_size must be >= 1")
     if step_size < 1:
@@ -308,11 +356,8 @@ def metabolite_trends(
     t_sorted = t[order]
 
     # window starts
-    starts = list(range(0, max(1, n_obs - window_size + 1), step_size))
-    if len(starts) == 0:
-        starts = [0]
-    if starts[-1] + window_size < n_obs:
-        starts.append(max(0, n_obs - window_size))
+    starts = _window_starts(n_obs, window_size, step_size)
+    effective_window = min(window_size, n_obs)
 
     n_windows = len(starts)
 
@@ -322,7 +367,7 @@ def metabolite_trends(
 
     # sliding-window pooling
     for i, start in enumerate(starts):
-        end = min(start + window_size, n_obs)
+        end = min(start + effective_window, n_obs)
         Xw = X_sorted[start:end]
         tw = t_sorted[start:end]
 
@@ -403,7 +448,7 @@ def metabolite_trends(
         "pval": pval,
         "qval": qval,
         "feature_names": feature_names,
-        "window_size": window_size,
+        "window_size": effective_window,
         "step_size": step_size,
         "kernel_stat": kernel_stat,
         "parameterization_key": parameterization_key,
@@ -422,9 +467,9 @@ def trend_cluster(
     if trends.ndim != 2:
         raise ValueError("trends must be a 2D array of shape (n_points, n_features)")
 
-    _n_points, n_features = trends.shape
-    if n_features < 2:
-        return np.zeros(n_features, dtype=int)
+    _n_points, total_features = trends.shape
+    if total_features < 2:
+        return np.zeros(total_features, dtype=int)
 
     # feature-wise matrix: rows = features, cols = points
     X = trends.T.copy()  # shape = (n_features, n_points)
@@ -433,11 +478,12 @@ def trend_cluster(
     row_valid = np.isfinite(X).all(axis=1)
     if row_valid.sum() == 0:
         raise ValueError("No valid feature trends found")
-    if row_valid.sum() < n_features:
-        # invalid rows become zero rows after fill; label them later
-        X_filled = X.copy()
-        X_filled[~row_valid] = 0.0
-        X = X_filled
+    if row_valid.sum() == 1:
+        out = np.full(total_features, -1, dtype=int)
+        out[row_valid] = 0
+        return out
+    X = X[row_valid]
+    n_features = X.shape[0]
 
     metric = metric.lower()
     cluster_method = cluster_method.lower()
@@ -530,6 +576,8 @@ def trend_cluster(
     elif cluster_method == "agglomerative":
         n_clusters = int(kwargs.get("n_clusters", 5))
         linkage = kwargs.get("linkage", "average")
+        if not 1 <= n_clusters <= n_features:
+            raise ValueError("n_clusters must be between 1 and the number of valid features")
 
         if linkage not in {"average", "complete", "single", "ward"}:
             raise ValueError("linkage must be one of {'average', 'complete', 'single', 'ward'}")
@@ -564,6 +612,8 @@ def trend_cluster(
     elif cluster_method == "kmeans":
         n_clusters = int(kwargs.get("n_clusters", 5))
         random_state = int(kwargs.get("random_state", 0))
+        if not 1 <= n_clusters <= n_features:
+            raise ValueError("n_clusters must be between 1 and the number of valid features")
 
         # optional normalization for shape-based clustering
         normalize = bool(kwargs.get("normalize", metric in {"cosine", "correlation"}))
@@ -583,10 +633,6 @@ def trend_cluster(
         )
         labels = model.fit_predict(X_km)
 
-    # mark invalid rows as -1
-    if not row_valid.all():
-        out = np.full(n_features, -1, dtype=int)
-        out[row_valid] = labels[row_valid]
-        labels = out
-
-    return labels
+    out = np.full(total_features, -1, dtype=int)
+    out[row_valid] = labels
+    return out

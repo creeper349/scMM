@@ -1,5 +1,5 @@
-import os
 import pickle
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,7 +10,12 @@ from matplotlib.ticker import AutoMinorLocator
 def eic(
     ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time: pd.Series | None = None
 ) -> plt.Axes:
-
+    if not np.isfinite(mz) or mz <= 0:
+        raise ValueError("mz must be a positive finite number")
+    if ppm_tol < 0:
+        raise ValueError("ppm_tol must be non-negative")
+    if time is not None and len(time) != len(data):
+        raise ValueError("time must contain one value per data row")
     mz_axis = data.columns.astype(np.float64)
     sort_index = np.where(np.abs((mz_axis - mz) / mz * 1e6) <= ppm_tol)[0]
     if len(sort_index) == 0:
@@ -40,39 +45,50 @@ def _plot_cells(
 def plot_ms(
     ax: plt.Axes, data: pd.DataFrame, frame_range: tuple[int, int] | None = None
 ) -> plt.Axes:
-    frame_range = data.index if frame_range is None else range(frame_range[0], frame_range[1])
-    mz_inten = data.loc[frame_range].values.sum(axis=0)
+    if data.empty:
+        raise ValueError("data must not be empty")
+    if frame_range is None:
+        start, stop = 0, len(data)
+    else:
+        start, stop = frame_range
+        start = max(0, start)
+        stop = min(len(data), stop)
+        if start >= stop:
+            raise ValueError("frame_range must select at least one row")
+    mz_inten = data.iloc[start:stop].values.sum(axis=0)
     for mz, inten in zip(data.columns.astype(np.float64), mz_inten, strict=True):
         ax.vlines(mz, 0, inten, colors="black")
     ax.set_xlabel("m/z")
     ax.set_ylabel("Intensity")
-    ax.set_title(f"MS Spectrum for frames {frame_range.start} to {frame_range.stop - 1}")
+    ax.set_title(f"MS Spectrum for rows {start} to {stop - 1}")
     return ax
 
 
 def plot_hook(stage, data):
     if stage == "find_cells":
+        cell_idx = np.asarray(data["cell_idx"], dtype=int)
+        if cell_idx.size == 0:
+            return
+        output_dir = Path(".tmp")
+        output_dir.mkdir(exist_ok=True)
         fig, ax = plt.subplots(figsize=(10, 4))
-        plot_ms(
-            ax, data["signal"], frame_range=(data["cell_idx"][0] - 50, data["cell_idx"][-1] + 50)
+        signal = data["signal"].sum(axis=1)
+        ax.plot(data["signal"].index, signal, color="black", linewidth=1, label="Signal")
+        ax.scatter(
+            data["signal"].index[cell_idx], signal.iloc[cell_idx], color="red", s=8, label="Cells"
         )
-        _plot_cells(
-            ax,
-            data["cell_mask"],
-            (
-                data["baseline"][data["cell_idx"]],
-                data["signal"].iloc[data["cell_idx"], :].sum(axis=1),
-            ),
-        )
-        plt.savefig(f".tmp/{stage}.svg", bbox_inches="tight")
+        ax.set_xlabel("Scan Index")
+        ax.set_ylabel("Total Intensity")
+        ax.legend()
+        fig.savefig(output_dir / f"{stage}.svg", bbox_inches="tight")
         plt.close(fig)
 
 
 def save_hook(stage, data):
-    if not os.path.exists(".tmp"):
-        os.mkdir(".tmp")
+    output_dir = Path(".tmp")
+    output_dir.mkdir(exist_ok=True)
     save_dict = {"stage": stage, "data": dict(data)}
-    with open(f".tmp/{stage}.pkl", "wb") as fp:
+    with (output_dir / f"{stage}.pkl").open("wb") as fp:
         pickle.dump(save_dict, fp)
 
 
@@ -87,10 +103,14 @@ def plot_spectrum(
     title: str | None = None,
     figsize: tuple[float, float] = (10, 4),
     linewidth: float = 1.0,
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     ax=None,
     **kwargs,
 ):
+    if top_n_labels < 0:
+        raise ValueError("top_n_labels must be non-negative")
+    if exclusion_window < 0:
+        raise ValueError("exclusion_window must be non-negative")
     mz, inten = spec.get_peaks()
     mz = np.asarray(mz, dtype=float)
     inten = np.asarray(inten, dtype=float)
@@ -99,19 +119,21 @@ def plot_spectrum(
     mz = mz[order]
     inten = inten[order]
     if mz_range is not None:
+        if mz_range[0] >= mz_range[1]:
+            raise ValueError("mz_range must be increasing")
         mask = (mz >= mz_range[0]) & (mz <= mz_range[1])
         mz = mz[mask]
         inten = inten[mask]
+    if mz.size == 0:
+        raise ValueError("Spectrum has no peaks in the requested range")
 
     if normalize:
         max_i = np.max(inten)
         if max_i > 0:
             inten = inten / max_i
 
-    created_fig = False
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
-        created_fig = True
     else:
         fig = ax.figure
 
@@ -166,9 +188,8 @@ def plot_spectrum(
     ax.margins(x=0.01)
 
     if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
-
-    if created_fig:
-        plt.show()
+        output = Path(save_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, bbox_inches="tight")
 
     return fig, ax

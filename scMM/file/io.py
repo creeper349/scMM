@@ -38,18 +38,27 @@ def load_single_file(
     else:
         raise ValueError("format must be 'auto', 'mzML', or 'mzXML'")
 
-    metadata: dict[str, Any] = {}
-    metadata["name"] = path.stem
-    metadata["timestamp"] = datetime.strptime(
-        exp.getDateTime().get(), "%Y-%m-%d %H:%M:%S"
-    ).timestamp()
-    metadata["instrument"] = exp.getInstrument().getName()
+    acquisition_time = exp.getDateTime().get()
+    try:
+        timestamp = datetime.fromisoformat(acquisition_time).timestamp()
+    except (TypeError, ValueError):
+        timestamp = path.stat().st_mtime
+        logger.warning(
+            "Missing or invalid acquisition time in %s; using file modification time", path
+        )
+    metadata: dict[str, Any] = {
+        "name": path.stem,
+        "timestamp": timestamp,
+        "instrument": exp.getInstrument().getName(),
+    }
     logger.info("Loaded MS file from %s", path)
 
     return exp, metadata
 
 
 def orbitrap_resolution_at_mz(mz: float, resolution_200: float) -> float:
+    if mz <= 0 or resolution_200 <= 0:
+        raise ValueError("mz and resolution_200 must be positive")
     return resolution_200 * np.sqrt(200.0 / mz)
 
 
@@ -126,6 +135,8 @@ def sum_spec(
     normalize: bool = False,
     zero_outside: bool = True,
 ):
+    if ms_level < 1:
+        raise ValueError("ms_level must be at least 1")
 
     mz_min, mz_max = map(float, mz_range)
 
@@ -203,6 +214,16 @@ def extract_peaks(
     window_fwhm_factor: float = 1.0,
     centroid_intensity_mode: str = "apex",
 ) -> tuple[np.ndarray, np.ndarray]:
+    if method not in {"centroid", "parabola"}:
+        raise ValueError("method must be 'centroid' or 'parabola'")
+    if centroid_intensity_mode not in {"apex", "sum"}:
+        raise ValueError("centroid_intensity_mode must be 'apex' or 'sum'")
+    if distance < 1:
+        raise ValueError("distance must be at least 1")
+    if prominence_ratio is not None and prominence_ratio < 0:
+        raise ValueError("prominence_ratio must be non-negative")
+    if window_fwhm_factor <= 0:
+        raise ValueError("window_fwhm_factor must be positive")
 
     mz = np.asarray(spec.get_peaks()[0], dtype=dtype)
     intensity = np.asarray(spec.get_peaks()[1], dtype=dtype)
@@ -334,7 +355,10 @@ def align_frame(
     dtype=np.float64,
     **kwargs,
 ):
-
+    if ppm < 0:
+        raise ValueError("ppm must be non-negative")
+    if aggregate not in {"sum", "max"}:
+        raise ValueError("aggregate must be 'sum' or 'max'")
     targets = np.asarray(mz_list, dtype=np.float64)
     if targets.ndim != 1 or targets.size == 0:
         raise ValueError("mz_list must be a non-empty 1D array-like.")
@@ -443,9 +467,13 @@ def align_frame(
 
 
 def pack_specs(spec_list, reset_rt=True, rt_step=1.0):
+    if rt_step <= 0:
+        raise ValueError("rt_step must be positive")
     exp = oms.MSExperiment()
 
     for i, spec in enumerate(spec_list):
+        if not isinstance(spec, oms.MSSpectrum):
+            raise TypeError("spec_list must contain only MSSpectrum objects")
         spec_copy = oms.MSSpectrum(spec)
 
         if reset_rt:

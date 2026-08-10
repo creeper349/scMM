@@ -18,11 +18,29 @@ def r1_decomposition(X: np.ndarray, tol: float = 1e-6, max_iter: int = 100, dtyp
     :param dtype: data type for computation
     :type dtype: data type
     """
-    a, b = np.ones((X.shape[0], 1), dtype=dtype), np.ones((X.shape[1], 1), dtype=dtype)
+    X = np.asarray(X, dtype=dtype)
+    if X.ndim != 2 or 0 in X.shape:
+        raise ValueError("X must be a non-empty 2D array")
+    if not np.isfinite(X).all():
+        raise ValueError("X must contain only finite values")
+    if tol <= 0 or max_iter < 1:
+        raise ValueError("tol must be positive and max_iter must be at least 1")
+    if not np.any(X):
+        return np.zeros((X.shape[0], 1), dtype=dtype), np.zeros((X.shape[1], 1), dtype=dtype)
+
+    a = np.ones((X.shape[0], 1), dtype=dtype)
+    b = np.ones((X.shape[1], 1), dtype=dtype)
     for _ in range(max_iter):
-        a_new = X @ b / (b.T @ b)
-        b_new = X.T @ a_new / (a_new.T @ a_new)
+        b_denom = (b.T @ b).item()
+        if b_denom <= np.finfo(dtype).eps:
+            break
+        a_new = X @ b / b_denom
+        a_denom = (a_new.T @ a_new).item()
+        if a_denom <= np.finfo(dtype).eps:
+            return np.zeros_like(a), np.zeros_like(b)
+        b_new = X.T @ a_new / a_denom
         if np.linalg.norm(a_new - a) < tol and np.linalg.norm(b_new - b) < tol:
+            a, b = a_new, b_new
             break
         a, b = a_new, b_new
     return a, b
@@ -101,6 +119,12 @@ def peak_recon(
     :rtype: Tuple[np.ndarray, np.ndarray]
     """
 
+    S = np.asarray(S, dtype=dtype)
+    B = np.asarray(B, dtype=dtype)
+    if S.ndim != 2 or S.shape != B.shape or 0 in S.shape:
+        raise ValueError("S and B must be non-empty 2D arrays with the same shape")
+    if sigma_min <= 0 or max_iter < 1:
+        raise ValueError("sigma_min must be positive and max_iter must be at least 1")
     _T, M = S.shape
     results = Parallel(n_jobs=n_jobs)(
         delayed(_optimize_single_channel)(

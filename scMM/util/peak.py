@@ -17,6 +17,10 @@ def filter_spectrum(
     return_snr: bool = False,
     baseline_stride: int = 10,
 ):
+    if not 0 <= baseline_quantile <= 1:
+        raise ValueError("baseline_quantile must be between 0 and 1")
+    if snr_threshold < 0:
+        raise ValueError("snr_threshold must be non-negative")
     mz, intensity = spec.get_peaks()
 
     mz = np.asarray(mz, dtype=np.float64)
@@ -122,7 +126,16 @@ def find_cell_peaks(
     n_jobs: int = -1,
     **kwargs,
 ):
-
+    if data.empty or data.shape[1] == 0:
+        raise ValueError("data must be a non-empty DataFrame")
+    if not np.isfinite(ref_mz) or ref_mz <= 0:
+        raise ValueError("ref_mz must be a positive finite number")
+    if baseline_filter_size < 1:
+        raise ValueError("baseline_filter_size must be at least 1")
+    if cell_snr < 0 or peak_snr < 0:
+        raise ValueError("cell_snr and peak_snr must be non-negative")
+    if not 0 <= max_zero_frac <= 1:
+        raise ValueError("max_zero_frac must be between 0 and 1")
     X = data.values.astype(dtype)
     mz_values = data.columns.astype(dtype)
     B = _filter(X, size=baseline_filter_size, filter=baseline_filter, **kwargs)
