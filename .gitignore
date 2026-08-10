@@ -159,6 +159,14 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# Project-local generated files
+.tmp/
+output.log
+
+# Editors
+.idea/
+.vscode/
+
 # Pyre type checker
 .pyre/
 

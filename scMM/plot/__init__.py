@@ -1,23 +1,43 @@
-from matplotlib import font_manager
+"""Plotting configuration and high-level plotting helpers.
+
+Importing this module intentionally leaves the caller's Matplotlib settings
+unchanged. Use :func:`configure_plotting` to opt into the scMM defaults.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
 import matplotlib
-import matplotlib.pyplot as plt
+from matplotlib import font_manager
 
-fname = "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"
 
-font_manager.fontManager.addfont(fname)
+def configure_plotting(font_path: str | Path | None = None) -> None:
+    """Apply scMM's plotting defaults, optionally using a custom font file."""
+    if font_path is not None:
+        path = Path(font_path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        font_manager.fontManager.addfont(path)
+        family_name = font_manager.FontProperties(fname=path).get_name()
+        matplotlib.rcParams.update(
+            {
+                "font.family": family_name,
+                "mathtext.fontset": "custom",
+                "mathtext.rm": family_name,
+            }
+        )
 
-prop = font_manager.FontProperties(fname=fname)
-family_name = prop.get_name()
+    matplotlib.rcParams.update(
+        {
+            "font.size": 14,
+            "axes.titlesize": 18,
+            "axes.labelsize": 16,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 12,
+        }
+    )
 
-plt.rcParams["font.family"] = family_name
-plt.rcParams["mathtext.fontset"] = "custom"
-plt.rcParams["mathtext.rm"] = family_name
 
-matplotlib.rcParams.update({
-    'font.size': 14,
-    'axes.titlesize': 18,
-    'axes.labelsize': 16,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 12,
-})
+__all__ = ["configure_plotting"]

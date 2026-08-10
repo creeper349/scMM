@@ -1,28 +1,31 @@
 from __future__ import annotations
 
-from typing import Optional, Union
-
+import anndata as ad
 import numpy as np
 import pandas as pd
-import anndata as ad
-import palantir
-import umap
 import seaborn as sns
-
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+import umap
 from matplotlib import pyplot as plt
+from sklearn.decomposition import PCA
 from sklearn.neighbors import kneighbors_graph
-from ._trajectory import (run_palantir, resample_trajectory, metabolic_velocity_field, 
-                          metabolite_trends, trend_cluster)
+from sklearn.preprocessing import StandardScaler
+
+from ._trajectory import (
+    metabolic_velocity_field,
+    metabolite_trends,
+    resample_trajectory,
+    run_palantir,
+    trend_cluster,
+)
+
 
 class PlotEngine:
     def __init__(
         self,
         df: pd.DataFrame,
         fig_path_dir: str,
-        obs: Optional[pd.DataFrame] = None,
-        var: Optional[pd.DataFrame] = None,
+        obs: pd.DataFrame | None = None,
+        var: pd.DataFrame | None = None,
     ):
         self.adata = ad.AnnData(
             X=df.values,
@@ -126,10 +129,7 @@ class PlotEngine:
                 if n_pca < 1:
                     raise ValueError("pca_n_components must be >= 1")
 
-                X_umap_input = PCA(
-                    n_components=n_pca,
-                    random_state=random_state
-                ).fit_transform(X)
+                X_umap_input = PCA(n_components=n_pca, random_state=random_state).fit_transform(X)
                 actual_source = f"X->PCA({n_pca})"
         else:
             X_umap_input = self._get_X()
@@ -156,26 +156,47 @@ class PlotEngine:
 
         return X_umap
 
-    def run_palantir(self, start_idx: int, plotting: bool = False, cmap: str = "viridis", 
-                     use_obsm: str = "X_umap", s = 1, **kwargs):
+    def run_palantir(
+        self,
+        start_idx: int,
+        plotting: bool = False,
+        cmap: str = "viridis",
+        use_obsm: str = "X_umap",
+        s=1,
+        **kwargs,
+    ):
         self.adata = run_palantir(adata=self.adata, start_idx=start_idx, **kwargs)
         if plotting:
             obsm = self.adata.obsm.get(use_obsm, None)
             assert obsm is not None, f"{use_obsm} not found in obsm"
             plt.figure(figsize=(6, 6))
-            sc = plt.scatter(obsm[:, 0], obsm[:, 1], c=self.adata.obs["palantir_pseudotime"], cmap=cmap, s=s)
+            sc = plt.scatter(
+                obsm[:, 0], obsm[:, 1], c=self.adata.obs["palantir_pseudotime"], cmap=cmap, s=s
+            )
             plt.colorbar(sc, label="Pseudotime")
             for spine in plt.gca().spines.values():
                 spine.set_visible(False)
             plt.savefig(f"{self.path}/palantir_pseudotime.svg", bbox_inches="tight")
             plt.close()
         return self
-    
-    def compute_trajectory(self, window_size: int = 100, step_size: int = 50,
-        cell_dist_key: str = "X_umap", parameterization_key: str = "palantir_pseudotime",
-        branch_prob_key: str = "palantir_branch_probs", store_key: str = "trajectory",
-        min_cells_per_window: int = 5, plotting: bool = False, cmap: str = "viridis", s: int = 1, 
-        traj_linewidth: float = 1.0, traj_points: int = 10, title = None, **kwargs):
+
+    def compute_trajectory(
+        self,
+        window_size: int = 100,
+        step_size: int = 50,
+        cell_dist_key: str = "X_umap",
+        parameterization_key: str = "palantir_pseudotime",
+        branch_prob_key: str = "palantir_branch_probs",
+        store_key: str = "trajectory",
+        min_cells_per_window: int = 5,
+        plotting: bool = False,
+        cmap: str = "viridis",
+        s: int = 1,
+        traj_linewidth: float = 1.0,
+        traj_points: int = 10,
+        title=None,
+        **kwargs,
+    ):
         self.adata = resample_trajectory(
             adata=self.adata,
             window_size=window_size,
@@ -185,35 +206,50 @@ class PlotEngine:
             branch_prob_key=branch_prob_key,
             store_key=store_key,
             min_cells_per_window=min_cells_per_window,
-            **kwargs
+            **kwargs,
         )
         if plotting:
             obsm = self.adata.obsm.get(cell_dist_key, None)
             assert obsm is not None, f"{cell_dist_key} not found in obsm"
             traj = self.adata.uns[store_key]
             plt.figure(figsize=(6, 6))
-            sc = plt.scatter(obsm[:, 0], obsm[:, 1], c=self.adata.obs[parameterization_key], cmap=cmap, s=s)
+            sc = plt.scatter(
+                obsm[:, 0], obsm[:, 1], c=self.adata.obs[parameterization_key], cmap=cmap, s=s
+            )
             for b in range(traj.shape[0]):
                 traj_points_mask = np.arange(0, traj.shape[1], traj.shape[1] // traj_points)
                 plt.plot(traj[b, :, 0], traj[b, :, 1], color="black", linewidth=traj_linewidth)
-                plt.scatter(traj[b, traj_points_mask, 0], traj[b, traj_points_mask, 1], color = "black", s=2 * traj_points)
+                plt.scatter(
+                    traj[b, traj_points_mask, 0],
+                    traj[b, traj_points_mask, 1],
+                    color="black",
+                    s=2 * traj_points,
+                )
             plt.colorbar(sc, label="Pseudotime")
             plt.xlabel("UMAP 1")
             plt.ylabel("UMAP 2")
             plt.xticks([])
             plt.yticks([])
-            if title is not None: plt.title(title, size=16)
+            if title is not None:
+                plt.title(title, size=16)
             plt.savefig(f"{self.path}/trajectory.svg", bbox_inches="tight")
             plt.close()
-            
-    def metabolic_velocity(self, window_size: int = 100, step_size: int = 50,
-                           parameterization_key: str = "time", plot = True,
-                           linewidth = 1, **kwargs):
+
+    def metabolic_velocity(
+        self,
+        window_size: int = 100,
+        step_size: int = 50,
+        parameterization_key: str = "time",
+        plot=True,
+        linewidth=1,
+        **kwargs,
+    ):
         self.adata = metabolic_velocity_field(
             adata=self.adata,
             window_size=window_size,
             step_size=step_size,
-            parameterization_key=parameterization_key)
+            parameterization_key=parameterization_key,
+        )
         time_centers = self.adata.uns["metabolic_velocity"]["time_centers"]
         speeds = self.adata.uns["metabolic_velocity"]["speeds"]
         if plot:
@@ -222,16 +258,17 @@ class PlotEngine:
             plt.ylabel("Metabolic velocity")
             plt.savefig(f"{self.path}/metabolic_velocity_speed.svg", bbox_inches="tight")
             plt.close()
-            
-    def plot_metabolite_trends(self, 
+
+    def plot_metabolite_trends(
+        self,
         parameterization_key: str = "time",
         window_size: int = 100,
         step_size: int = 50,
         kernel_stat: str = "median",
-        feature_name_key: Optional[str] = None,
-        plot_top_n: Optional[int] = None,
+        feature_name_key: str | None = None,
+        plot_top_n: int | None = None,
         cmap: str = "viridis",
-        **kwargs
+        **kwargs,
     ):
         self.adata = metabolite_trends(
             adata=self.adata,
@@ -239,7 +276,7 @@ class PlotEngine:
             step_size=step_size,
             parameterization_key=parameterization_key,
             kernel_stat=kernel_stat,
-            feature_name_key=feature_name_key
+            feature_name_key=feature_name_key,
         )
 
         if plot_top_n is not None:
@@ -252,7 +289,7 @@ class PlotEngine:
                 valid_idx = set(np.where(valid_mask.values)[0])
                 rank_idx = [idx for idx in rank_idx if idx in valid_idx]
 
-            top_idx = rank_idx[:min(plot_top_n, len(rank_idx))]
+            top_idx = rank_idx[: min(plot_top_n, len(rank_idx))]
 
             M = self.adata.uns["metabolite_trends"]["pooled"][:, top_idx].T
 
@@ -275,14 +312,16 @@ class PlotEngine:
             )
 
             feature_names = self.adata.uns["metabolite_trends"]["feature_names"]
-            qval, rho = self.adata.uns["metabolite_trends"]["qval"], self.adata.uns["metabolite_trends"]["rho"]
             ylabels = [feature_names[j] for j in top_idx]
 
             plt.yticks(np.arange(len(top_idx)), ylabels)
             plt.xticks(
                 np.arange(len(self.adata.uns["metabolite_trends"]["time_centers"])),
-                [f"{x:.2f}" if np.isfinite(x) else "" for x in self.adata.uns["metabolite_trends"]["time_centers"]],
-                rotation=90
+                [
+                    f"{x:.2f}" if np.isfinite(x) else ""
+                    for x in self.adata.uns["metabolite_trends"]["time_centers"]
+                ],
+                rotation=90,
             )
             plt.xlabel(kwargs.get("xlabel", parameterization_key))
             plt.ylabel(kwargs.get("ylabel", "Metabolite"))
@@ -290,11 +329,21 @@ class PlotEngine:
             plt.tight_layout()
             plt.savefig(f"{self.path}/metabolite_trends_top{len(top_idx)}.svg", bbox_inches="tight")
             plt.close()
-            
-    def plot_trend_clusters(self, metric: str = "correlation",
-        cluster_method: str = "leiden", linewidth: float = 1.0, top_k: int = None, **kwargs):
+
+    def plot_trend_clusters(
+        self,
+        metric: str = "correlation",
+        cluster_method: str = "leiden",
+        linewidth: float = 1.0,
+        top_k: int | None = None,
+        **kwargs,
+    ):
         trends = self.adata.uns["metabolite_trends"]["pooled"]
-        top_k_idx = self.adata.uns["metabolite_trends"]["rank_idx"][:top_k] if top_k is not None else np.arange(trends.shape[1])
+        top_k_idx = (
+            self.adata.uns["metabolite_trends"]["rank_idx"][:top_k]
+            if top_k is not None
+            else np.arange(trends.shape[1])
+        )
         trends = trends[:, top_k_idx]
 
         # z-score each feature across time
@@ -303,9 +352,11 @@ class PlotEngine:
         std[std == 0] = 1.0
         trends = (trends - mean) / std
 
-        cluster_labels = trend_cluster(trends, metric=metric, cluster_method=cluster_method, **kwargs)
+        cluster_labels = trend_cluster(
+            trends, metric=metric, cluster_method=cluster_method, **kwargs
+        )
         label_unique = np.unique(cluster_labels)
-        fig, ax = plt.subplots(nrows=label_unique.size, figsize=(6, 6 * label_unique.size))
+        _fig, ax = plt.subplots(nrows=label_unique.size, figsize=(6, 6 * label_unique.size))
 
         if label_unique.size == 1:
             ax = [ax]
@@ -313,18 +364,31 @@ class PlotEngine:
         for i, label in enumerate(label_unique):
             cluster_trends = trends.T[cluster_labels == label]
             mean_trend = np.nanmean(cluster_trends, axis=0)
-            ax[i].plot(self.adata.uns["metabolite_trends"]["time_centers"], mean_trend, color="black", linewidth=linewidth)
+            ax[i].plot(
+                self.adata.uns["metabolite_trends"]["time_centers"],
+                mean_trend,
+                color="black",
+                linewidth=linewidth,
+            )
             cluster_idx = np.where(cluster_labels == label)
             for j in cluster_idx[0]:
-                ax[i].plot(self.adata.uns["metabolite_trends"]["time_centers"], trends.T[j], color="gray", alpha=0.5, linewidth=0.5)
+                ax[i].plot(
+                    self.adata.uns["metabolite_trends"]["time_centers"],
+                    trends.T[j],
+                    color="gray",
+                    alpha=0.5,
+                    linewidth=0.5,
+                )
             ax[i].set_title(f"Cluster {label} (n={cluster_trends.shape[0]})")
             ax[i].set_xlabel(kwargs.get("xlabel", "Time"))
             ax[i].set_ylabel(kwargs.get("ylabel", "Relative intensity"))
 
         plt.tight_layout()
-        plt.savefig(f"{self.path}/trend_clusters_{cluster_method}_{metric}.svg", bbox_inches="tight")
+        plt.savefig(
+            f"{self.path}/trend_clusters_{cluster_method}_{metric}.svg", bbox_inches="tight"
+        )
         plt.close()
-        
+
     def cluster_cells(
         self,
         method: str = "leiden",
@@ -335,7 +399,7 @@ class PlotEngine:
         figsize=(6, 6),
         s: float = 8,
         cmap: str = "Set2",
-        **kwargs
+        **kwargs,
     ):
 
         method = method.lower()
@@ -353,24 +417,21 @@ class PlotEngine:
             raise ValueError("X_umap must contain at least 2 dimensions")
 
         knn = kneighbors_graph(
-            X_cluster,
-            n_neighbors=n_neighbors,
-            mode="connectivity",
-            include_self=False
+            X_cluster, n_neighbors=n_neighbors, mode="connectivity", include_self=False
         )
 
         sources, targets = knn.nonzero()
-        edges = list(zip(sources.tolist(), targets.tolist()))
+        edges = list(zip(sources.tolist(), targets.tolist(), strict=True))
 
         if method == "leiden":
             try:
                 import igraph as ig
                 import leidenalg
-            except ImportError:
+            except ImportError as exc:
                 raise ImportError(
                     "Leiden clustering requires igraph and leidenalg. "
-                    "Please install them via 'pip install igraph leidenalg'."
-                )
+                    "Install the Conda packages python-igraph and leidenalg."
+                ) from exc
 
             g = ig.Graph(n=X_cluster.shape[0], edges=edges, directed=False)
             g.simplify()
@@ -380,7 +441,7 @@ class PlotEngine:
                 leidenalg.RBConfigurationVertexPartition,
                 resolution_parameter=resolution,
                 seed=random_state,
-                **kwargs
+                **kwargs,
             )
             labels = np.array(partition.membership, dtype=int)
 
@@ -388,22 +449,16 @@ class PlotEngine:
             try:
                 import networkx as nx
                 from networkx.algorithms.community import louvain_communities
-            except ImportError:
+            except ImportError as exc:
                 raise ImportError(
-                    "Louvain clustering requires networkx. "
-                    "Please install it via 'pip install networkx'."
-                )
+                    "Louvain clustering requires the Conda package networkx."
+                ) from exc
 
             G = nx.Graph()
             G.add_nodes_from(range(X_cluster.shape[0]))
             G.add_edges_from(edges)
 
-            communities = louvain_communities(
-                G,
-                resolution=resolution,
-                seed=random_state,
-                **kwargs
-            )
+            communities = louvain_communities(G, resolution=resolution, seed=random_state, **kwargs)
 
             labels = np.empty(X_cluster.shape[0], dtype=int)
             for i, comm in enumerate(communities):
@@ -417,15 +472,10 @@ class PlotEngine:
         palette = sns.color_palette(cmap, n_colors=len(uniq))
         color_map = {lab: palette[i] for i, lab in enumerate(uniq)}
 
-        for i, lab in enumerate(uniq):
+        for lab in uniq:
             idx = labels == lab
             ax.scatter(
-                X_plot[idx, 0],
-                X_plot[idx, 1],
-                s=s,
-                color=color_map[lab],
-                linewidths=0,
-                alpha=0.85
+                X_plot[idx, 0], X_plot[idx, 1], s=s, color=color_map[lab], linewidths=0, alpha=0.85
             )
 
             x_center = np.median(X_plot[idx, 0])
@@ -438,7 +488,7 @@ class PlotEngine:
                 ha="center",
                 va="center",
                 weight="bold",
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7)
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
             )
 
         ax.set_xlabel("UMAP1")
@@ -447,15 +497,21 @@ class PlotEngine:
         plt.tight_layout()
         plt.savefig(f"{self.path}/{method}_{key_added}_umap.svg", bbox_inches="tight")
         plt.close(fig)
-        
-    def feature_network(self, name_key: str = None, class_key: str = None,
-                    metric: str = "pearson", **kwargs):
+
+    def feature_network(
+        self,
+        name_key: str | None = None,
+        class_key: str | None = None,
+        metric: str = "pearson",
+        **kwargs,
+    ):
         if name_key is not None and name_key in self.adata.var.columns:
             feature_names = self.adata.var[name_key].values
 
-            nan_mask = pd.isna(feature_names) | (
-                pd.Series(feature_names).astype(str).str.strip() == ""
-            ).values
+            nan_mask = (
+                pd.isna(feature_names)
+                | (pd.Series(feature_names).astype(str).str.strip() == "").values
+            )
 
             feature_names[nan_mask] = [f"feature_{i}" for i in np.where(nan_mask)[0]]
             feature_arr = self.adata.X[:, ~nan_mask]
@@ -463,19 +519,20 @@ class PlotEngine:
         else:
             feature_names = np.array([f"feature_{i}" for i in range(self.adata.n_vars)])
             feature_arr = self.adata.X
-            
+
         if metric == "pearson":
             corr_matrix = np.corrcoef(feature_arr.T)
             np.fill_diagonal(corr_matrix, 1)
             dist = np.sqrt(2 * (1 - np.abs(corr_matrix)))
         elif metric == "euclidean":
             from sklearn.metrics import pairwise_distances
+
             corr_matrix = pairwise_distances(feature_arr.T, metric="euclidean")
 
         feature_emb = umap.UMAP(
             metric="precomputed",
             n_neighbors=kwargs.get("n_neighbors", 15),
-            min_dist=kwargs.get("min_dist", 0.1)
+            min_dist=kwargs.get("min_dist", 0.1),
         ).fit_transform(dist)
 
         if np.issubdtype(np.array(feature_names).dtype, np.number):
@@ -490,14 +547,17 @@ class PlotEngine:
             cmap = kwargs.get("cmap", "tab20")
 
         plt.figure(figsize=kwargs.get("figsize", (6, 6)))
-        plt.scatter(feature_emb[:, 0], feature_emb[:, 1],
-                    s=10, c=colors, cmap=cmap)
+        plt.scatter(feature_emb[:, 0], feature_emb[:, 1], s=10, c=colors, cmap=cmap)
 
         for i in range(feature_emb.shape[0]):
-            plt.text(feature_emb[i, 0], feature_emb[i, 1],
-                    str(feature_names[i]), fontsize=kwargs.get("fontsize", 8), alpha=kwargs.get("alpha", 0.7))
+            plt.text(
+                feature_emb[i, 0],
+                feature_emb[i, 1],
+                str(feature_names[i]),
+                fontsize=kwargs.get("fontsize", 8),
+                alpha=kwargs.get("alpha", 0.7),
+            )
 
-        plt.savefig(f"{self.path}/feature_network_{metric}.svg",
-                    bbox_inches="tight")
-        
+        plt.savefig(f"{self.path}/feature_network_{metric}.svg", bbox_inches="tight")
+
         return feature_emb

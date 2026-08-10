@@ -1,42 +1,61 @@
-from typing import Literal, Tuple, Dict, Any
-from scipy.signal import find_peaks
-from joblib import Parallel, delayed
-from tqdm import tqdm
-from datetime import datetime
-from collections.abc import Sequence
-import pyopenms as oms
-import pandas as pd
-import numpy as np
-import os
+"""Mass-spectrometry file loading and spectrum alignment utilities."""
+
 import logging
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+import numpy as np
+import pandas as pd
+import pyopenms as oms
+from scipy.signal import find_peaks
+
+logger = logging.getLogger(__name__)
+
 
 def load_single_file(
-    path: str,
-    format: Literal['auto', 'mzML', 'mzXML'] = 'mzML'
-) -> Tuple[oms.MSExperiment, Dict[str, Any]]:
-    
-    exp = oms.MSExperiment()
-    if format == 'auto':
-        format = 'mzML' if path.lower().endswith('.mzml') else 'mzXML'
-    
-    if format == 'mzML':
-        oms.MzMLFile().load(path, exp)
-    elif format == 'mzXML':
-        oms.MzXMLFile().load(path, exp)
+    path: str | Path, format: Literal["auto", "mzML", "mzXML"] = "mzML"
+) -> tuple[oms.MSExperiment, dict[str, Any]]:
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(path)
 
-    metadata = {}
-    metadata["name"], _ = os.path.splitext(os.path.basename(path))
-    metadata["timestamp"] = datetime.strptime(exp.getDateTime().get(), "%Y-%m-%d %H:%M:%S").timestamp()
+    exp = oms.MSExperiment()
+    if format == "auto":
+        suffix = path.suffix.lower()
+        if suffix == ".mzml":
+            format = "mzML"
+        elif suffix == ".mzxml":
+            format = "mzXML"
+        else:
+            raise ValueError(f"Cannot infer MS format from extension: {path.suffix}")
+
+    if format == "mzML":
+        oms.MzMLFile().load(str(path), exp)
+    elif format == "mzXML":
+        oms.MzXMLFile().load(str(path), exp)
+    else:
+        raise ValueError("format must be 'auto', 'mzML', or 'mzXML'")
+
+    metadata: dict[str, Any] = {}
+    metadata["name"] = path.stem
+    metadata["timestamp"] = datetime.strptime(
+        exp.getDateTime().get(), "%Y-%m-%d %H:%M:%S"
+    ).timestamp()
     metadata["instrument"] = exp.getInstrument().getName()
-    logging.info(f"Loaded MS file from: {path}")
+    logger.info("Loaded MS file from %s", path)
 
     return exp, metadata
+
 
 def orbitrap_resolution_at_mz(mz: float, resolution_200: float) -> float:
     return resolution_200 * np.sqrt(200.0 / mz)
 
+
 def orbitrap_fwhm_at_mz(mz: float, resolution_200: float) -> float:
     return mz / orbitrap_resolution_at_mz(mz, resolution_200)
+
 
 def build_orbitrap_grid(
     mz_range=(100.0, 1000.0),
@@ -97,6 +116,7 @@ def _prepare_sorted_unique_peaks(mz: np.ndarray, inten: np.ndarray):
 
     return mz, inten
 
+
 def sum_spec(
     exp: oms.MSExperiment,
     mz_range=(100.0, 1000.0),
@@ -132,13 +152,7 @@ def sum_spec(
             continue
 
         if zero_outside:
-            interp_inten = np.interp(
-                mz_grid,
-                mz,
-                inten,
-                left=0.0,
-                right=0.0
-            )
+            interp_inten = np.interp(mz_grid, mz, inten, left=0.0, right=0.0)
         else:
             interp_inten = np.interp(mz_grid, mz, inten)
 
@@ -153,10 +167,7 @@ def sum_spec(
     spec_out = oms.MSSpectrum()
     spec_out.setMSLevel(ms_level)
     spec_out.setRT(0.0)
-    spec_out.set_peaks((
-        mz_grid.astype(np.float64),
-        out_intensity.astype(np.float32)
-    ))
+    spec_out.set_peaks((mz_grid.astype(np.float64), out_intensity.astype(np.float32)))
 
     spec_out.setMetaValue("n_summed_spectra", int(total_spectra))
     spec_out.setMetaValue("resolution_200", float(resolution_200))
@@ -169,31 +180,29 @@ def sum_spec(
 
     return spec_out
 
+
 def sum_spectrum_from_file(
-        path: str,
-        ms_level: int = 1,
-        resolution_200: float = 35000.0,
-        points_per_fwhm: float = 5.0,
-    ) -> tuple[oms.MSSpectrum, int]:
-    exp = oms.MSExperiment()
-    oms.MzMLFile().load(path, exp)
+    path: str | Path,
+    ms_level: int = 1,
+    resolution_200: float = 35000.0,
+    points_per_fwhm: float = 5.0,
+) -> oms.MSSpectrum:
+    exp, _ = load_single_file(path, format="auto")
     return sum_spec(
-        exp,
-        ms_level=ms_level,
-        resolution_200=resolution_200,
-        points_per_fwhm=points_per_fwhm
+        exp, ms_level=ms_level, resolution_200=resolution_200, points_per_fwhm=points_per_fwhm
     )
+
 
 def extract_peaks(
     spec: oms.MSSpectrum,
     dtype=np.float64,
-    prominence_ratio: float = None,
+    prominence_ratio: float | None = None,
     distance: int = 3,
-    method: str = "centroid",    
-    resolution_200: float = 35000.0, 
-    window_fwhm_factor: float = 1.0,   
-    centroid_intensity_mode: str = "apex" 
-) -> Tuple[np.ndarray, np.ndarray]:
+    method: str = "centroid",
+    resolution_200: float = 35000.0,
+    window_fwhm_factor: float = 1.0,
+    centroid_intensity_mode: str = "apex",
+) -> tuple[np.ndarray, np.ndarray]:
 
     mz = np.asarray(spec.get_peaks()[0], dtype=dtype)
     intensity = np.asarray(spec.get_peaks()[1], dtype=dtype)
@@ -213,11 +222,7 @@ def extract_peaks(
             return np.array([], dtype=dtype), np.array([], dtype=dtype)
         prom = np.max(intensity) * prominence_ratio
 
-    peak_idx, _ = find_peaks(
-        intensity,
-        prominence=prom,
-        distance=distance
-    )
+    peak_idx, _ = find_peaks(intensity, prominence=prom, distance=distance)
 
     if peak_idx.size == 0:
         return np.array([], dtype=dtype), np.array([], dtype=dtype)
@@ -244,10 +249,7 @@ def extract_peaks(
             peak_int_out.append(intensity[i])
             continue
 
-        half_window_pts = max(
-            1,
-            int(np.ceil(window_fwhm_factor * fwhm / dm_local))
-        )
+        half_window_pts = max(1, int(np.ceil(window_fwhm_factor * fwhm / dm_local)))
 
         left = max(0, i - half_window_pts)
         right = min(n, i + half_window_pts + 1)
@@ -262,10 +264,7 @@ def extract_peaks(
 
         if method == "centroid":
             s = np.sum(int_win)
-            if s <= 0:
-                peak_mz = mz[i]
-            else:
-                peak_mz = np.sum(mz_win * int_win) / s
+            peak_mz = mz[i] if s <= 0 else np.sum(mz_win * int_win) / s
 
             if centroid_intensity_mode == "apex":
                 peak_int = intensity[i]
@@ -325,15 +324,16 @@ def extract_peaks(
 
     return np.asarray(peak_mz_out, dtype=dtype), np.asarray(peak_int_out, dtype=dtype)
 
+
 def align_frame(
-        exp: oms.MSExperiment,
-        mz_list,
-        ppm: float = 10.0,
-        ms_level: int = 1,
-        aggregate: str = "max",   # "sum" | "max"
-        dtype=np.float64,
-        **kwargs
-    ):
+    exp: oms.MSExperiment,
+    mz_list,
+    ppm: float = 10.0,
+    ms_level: int = 1,
+    aggregate: str = "max",  # "sum" | "max"
+    dtype=np.float64,
+    **kwargs,
+):
 
     targets = np.asarray(mz_list, dtype=np.float64)
     if targets.ndim != 1 or targets.size == 0:
@@ -363,12 +363,11 @@ def align_frame(
 
     X = np.zeros((n_frames, n_targets), dtype=np.float32)
 
-    for row_idx, (frame_id, spec) in enumerate(spectra):
-
+    for row_idx, (_frame_id, spec) in enumerate(spectra):
         mz, inten = extract_peaks(
             spec,
             dtype=dtype,
-            prominence_ratio=kwargs.get("prominence_ratio", None),
+            prominence_ratio=kwargs.get("prominence_ratio"),
             distance=kwargs.get("distance", 3),
             method=kwargs.get("method", "centroid"),
             resolution_200=kwargs.get("resolution_200", 70000.0),
@@ -442,11 +441,8 @@ def align_frame(
 
     return df, rt_df
 
-def pack_specs(
-        spec_list,
-        reset_rt=True,
-        rt_step=1.0
-    ):
+
+def pack_specs(spec_list, reset_rt=True, rt_step=1.0):
     exp = oms.MSExperiment()
 
     for i, spec in enumerate(spec_list):
@@ -459,12 +455,21 @@ def pack_specs(
 
     return exp
 
-def save_spectra(spectra, output_path: str):
+
+def save_spectra(spectra, output_path: str | Path) -> Path:
+    """Save a spectrum or sequence of spectra as mzML."""
     exp = oms.MSExperiment()
     if isinstance(spectra, oms.MSSpectrum):
         exp.addSpectrum(spectra)
     elif isinstance(spectra, Sequence) and not isinstance(spectra, (str, bytes)):
-        for i, spec in enumerate(spectra):
+        for spec in spectra:
+            if not isinstance(spec, oms.MSSpectrum):
+                raise TypeError("Every item in spectra must be an MSSpectrum")
             exp.addSpectrum(spec)
+    else:
+        raise TypeError("spectra must be an MSSpectrum or a sequence of MSSpectrum objects")
 
-    oms.MzMLFile().store(output_path, exp)
+    output = Path(output_path).expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    oms.MzMLFile().store(str(output), exp)
+    return output

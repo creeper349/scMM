@@ -1,6 +1,9 @@
+import logging
 import time
-import numpy as np
 from functools import wraps
+
+logger = logging.getLogger(__name__)
+
 
 def timer(func):
 
@@ -9,7 +12,7 @@ def timer(func):
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()
-        print(f"Function '{func.__name__}' executed in {end_time - start_time:.4f} seconds")
+        logger.info("Function %s executed in %.4f seconds", func.__name__, end_time - start_time)
         return result
 
     return wrapper

@@ -1,16 +1,16 @@
-import matplotlib
-matplotlib.use('Agg')
-
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
 import os
 import pickle
-from typing import Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from matplotlib.ticker import AutoMinorLocator
 
-def eic(ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time: Optional[pd.Series] = None) -> plt.Axes:
-   
+
+def eic(
+    ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time: pd.Series | None = None
+) -> plt.Axes:
+
     mz_axis = data.columns.astype(np.float64)
     sort_index = np.where(np.abs((mz_axis - mz) / mz * 1e6) <= ppm_tol)[0]
     if len(sort_index) == 0:
@@ -26,58 +26,71 @@ def eic(ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time:
     ax.legend()
     return ax, (time.values if time is not None else data.index, eic_values)
 
-def _plot_cells(ax: plt.Axes, cell_mask:np.ndarray, data: Tuple[np.ndarray, np.ndarray]) -> plt.Axes:
+
+def _plot_cells(
+    ax: plt.Axes, cell_mask: np.ndarray, data: tuple[np.ndarray, np.ndarray]
+) -> plt.Axes:
     t, eic_values = data
     t, eic_values = t[cell_mask], eic_values[cell_mask]
-    ax.scatter(t, eic_values, color='red', s=3, label='Cells')
+    ax.scatter(t, eic_values, color="red", s=3, label="Cells")
     ax.legend()
     return ax
 
-def plot_ms(ax: plt.Axes,
-            data: pd.DataFrame,
-            frame_range: Optional[Tuple[int, int]] = None) -> plt.Axes:
+
+def plot_ms(
+    ax: plt.Axes, data: pd.DataFrame, frame_range: tuple[int, int] | None = None
+) -> plt.Axes:
     frame_range = data.index if frame_range is None else range(frame_range[0], frame_range[1])
     mz_inten = data.loc[frame_range].values.sum(axis=0)
-    for mz, inten in zip(data.columns.astype(np.float64), mz_inten):
-        ax.vlines(mz, 0, inten, colors='black')
+    for mz, inten in zip(data.columns.astype(np.float64), mz_inten, strict=True):
+        ax.vlines(mz, 0, inten, colors="black")
     ax.set_xlabel("m/z")
     ax.set_ylabel("Intensity")
     ax.set_title(f"MS Spectrum for frames {frame_range.start} to {frame_range.stop - 1}")
     return ax
 
+
 def plot_hook(stage, data):
     if stage == "find_cells":
         fig, ax = plt.subplots(figsize=(10, 4))
-        plot_ms(ax, data["signal"], frame_range=(data["cell_idx"][0] - 50, data["cell_idx"][-1] + 50))
-        _plot_cells(ax, data["cell_mask"], (data["baseline"][data["cell_idx"]], data["signal"].iloc[data["cell_idx"], :].sum(axis=1)))
+        plot_ms(
+            ax, data["signal"], frame_range=(data["cell_idx"][0] - 50, data["cell_idx"][-1] + 50)
+        )
+        _plot_cells(
+            ax,
+            data["cell_mask"],
+            (
+                data["baseline"][data["cell_idx"]],
+                data["signal"].iloc[data["cell_idx"], :].sum(axis=1),
+            ),
+        )
         plt.savefig(f".tmp/{stage}.svg", bbox_inches="tight")
         plt.close(fig)
-            
+
+
 def save_hook(stage, data):
     if not os.path.exists(".tmp"):
         os.mkdir(".tmp")
-    save_dict = {
-        "stage": stage,
-        "data": dict(data)
-    }
+    save_dict = {"stage": stage, "data": dict(data)}
     with open(f".tmp/{stage}.pkl", "wb") as fp:
         pickle.dump(save_dict, fp)
 
+
 def plot_spectrum(
-        spec,
-        top_n_labels: int = 0,
-        mz_range: tuple[float, float] | None = None,
-        intensity_range: tuple[float, float] | None = None,
-        normalize: bool = False,
-        exclusion_window: float = 10.0,
-        label_fmt: str = "{:.4f}",
-        title: str | None = None,
-        figsize: tuple[float, float] = (10, 4),
-        linewidth: float = 1.0,
-        save_path: str | None = None,
-        ax=None,
-        **kwargs
-    ):
+    spec,
+    top_n_labels: int = 0,
+    mz_range: tuple[float, float] | None = None,
+    intensity_range: tuple[float, float] | None = None,
+    normalize: bool = False,
+    exclusion_window: float = 10.0,
+    label_fmt: str = "{:.4f}",
+    title: str | None = None,
+    figsize: tuple[float, float] = (10, 4),
+    linewidth: float = 1.0,
+    save_path: str | None = None,
+    ax=None,
+    **kwargs,
+):
     mz, inten = spec.get_peaks()
     mz = np.asarray(mz, dtype=float)
     inten = np.asarray(inten, dtype=float)
@@ -102,7 +115,7 @@ def plot_spectrum(
     else:
         fig = ax.figure
 
-    ax.plot(mz, inten, linewidth=linewidth, color = kwargs.get("color", "black"))
+    ax.plot(mz, inten, linewidth=linewidth, color=kwargs.get("color", "black"))
     ax.set_xlim(mz_range if mz_range is not None else (np.min(mz), np.max(mz)))
     ax.set_xlabel("m/z")
     ax.set_ylabel("Relative Intensity" if normalize else "Intensity")

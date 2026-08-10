@@ -1,9 +1,8 @@
 import re
-from typing import Iterable
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 
 PROTON = 1.007276466812
 NA = 22.989218
@@ -34,7 +33,7 @@ def parse_sdf_record(record: str) -> dict:
     if lines:
         result["record_title"] = lines[0].strip()
 
-    pattern = re.compile(r"^> <(.+?)>$")
+    pattern = re.compile(r"^>\s*<([^>]+)>\s*$")
 
     i = 0
     while i < len(lines):
@@ -61,8 +60,8 @@ def parse_sdf_record(record: str) -> dict:
     return result
 
 
-def load_lipidmaps_sdf(sdf_path: str) -> pd.DataFrame:
-    with open(sdf_path, "r", encoding="utf-8", errors="ignore") as f:
+def load_lipidmaps_sdf(sdf_path: str | Path) -> pd.DataFrame:
+    with Path(sdf_path).expanduser().open("r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
 
     records = [r.strip() for r in text.split("$$$$") if r.strip()]
@@ -80,11 +79,17 @@ def load_lipidmaps_sdf(sdf_path: str) -> pd.DataFrame:
 
 
 def theoretical_mz(neutral_mass: float, adduct_info: dict) -> float:
-    return (neutral_mass + adduct_info["mass_shift"]) / abs(adduct_info["charge"])
+    charge = adduct_info["charge"]
+    if charge == 0:
+        raise ValueError("Adduct charge cannot be zero")
+    return (neutral_mass + adduct_info["mass_shift"]) / abs(charge)
 
 
 def neutral_mass_from_mz(mz: float, adduct_info: dict) -> float:
-    return mz * abs(adduct_info["charge"]) - adduct_info["mass_shift"]
+    charge = adduct_info["charge"]
+    if charge == 0:
+        raise ValueError("Adduct charge cannot be zero")
+    return mz * abs(charge) - adduct_info["mass_shift"]
 
 
 def _is_iterable_mz(x) -> bool:
@@ -94,13 +99,13 @@ def _is_iterable_mz(x) -> bool:
 class SDFMzSearcher:
     def __init__(
         self,
-        sdf_path: str,
+        sdf_path: str | Path,
         adducts_pos: dict | None = None,
         adducts_neg: dict | None = None,
     ):
         self.db = load_lipidmaps_sdf(sdf_path)
-        self.adducts_pos = adducts_pos or DEFAULT_ADDUCTS_POS
-        self.adducts_neg = adducts_neg or DEFAULT_ADDUCTS_NEG
+        self.adducts_pos = DEFAULT_ADDUCTS_POS if adducts_pos is None else adducts_pos
+        self.adducts_neg = DEFAULT_ADDUCTS_NEG if adducts_neg is None else adducts_neg
 
     def _get_adducts(self, mode: str) -> dict:
         if mode not in {"pos", "neg", "both"}:
@@ -120,6 +125,10 @@ class SDFMzSearcher:
         mode: str = "both",
         max_results: int | None = None,
     ) -> pd.DataFrame:
+        if ppm_tol < 0:
+            raise ValueError("ppm_tol must be non-negative")
+        if max_results is not None and max_results < 0:
+            raise ValueError("max_results must be non-negative or None")
         adducts = self._get_adducts(mode)
         masses = self.db["EXACT_MASS"].to_numpy(dtype=float)
 
@@ -134,26 +143,28 @@ class SDFMzSearcher:
             for idx in hit_idx:
                 row = self.db.iloc[idx]
 
-                results.append({
-                    "query_mz": mz,
-                    "adduct": adduct_name,
-                    "theoretical_mz": theo_mz[idx],
-                    "ppm_error": err_ppm[idx],
-                    "abs_ppm_error": abs(err_ppm[idx]),
-                    "neutral_mass": row.get("EXACT_MASS", np.nan),
-                    "LM_ID": row.get("LM_ID", ""),
-                    "COMMON_NAME": row.get("COMMON_NAME", ""),
-                    "SYSTEMATIC_NAME": row.get("SYSTEMATIC_NAME", ""),
-                    "ABBREVIATION": row.get("ABBREVIATION", ""),
-                    "FORMULA": row.get("FORMULA", ""),
-                    "CATEGORY": row.get("CATEGORY", ""),
-                    "MAIN_CLASS": row.get("MAIN_CLASS", ""),
-                    "SUB_CLASS": row.get("SUB_CLASS", ""),
-                    "INCHI_KEY": row.get("INCHI_KEY", ""),
-                    "HMDB_ID": row.get("HMDB_ID", ""),
-                    "KEGG_ID": row.get("KEGG_ID", ""),
-                    "PUBCHEM_CID": row.get("PUBCHEM_CID", ""),
-                })
+                results.append(
+                    {
+                        "query_mz": mz,
+                        "adduct": adduct_name,
+                        "theoretical_mz": theo_mz[idx],
+                        "ppm_error": err_ppm[idx],
+                        "abs_ppm_error": abs(err_ppm[idx]),
+                        "neutral_mass": row.get("EXACT_MASS", np.nan),
+                        "LM_ID": row.get("LM_ID", ""),
+                        "COMMON_NAME": row.get("COMMON_NAME", ""),
+                        "SYSTEMATIC_NAME": row.get("SYSTEMATIC_NAME", ""),
+                        "ABBREVIATION": row.get("ABBREVIATION", ""),
+                        "FORMULA": row.get("FORMULA", ""),
+                        "CATEGORY": row.get("CATEGORY", ""),
+                        "MAIN_CLASS": row.get("MAIN_CLASS", ""),
+                        "SUB_CLASS": row.get("SUB_CLASS", ""),
+                        "INCHI_KEY": row.get("INCHI_KEY", ""),
+                        "HMDB_ID": row.get("HMDB_ID", ""),
+                        "KEGG_ID": row.get("KEGG_ID", ""),
+                        "PUBCHEM_CID": row.get("PUBCHEM_CID", ""),
+                    }
+                )
 
         out = pd.DataFrame(results)
 
@@ -197,10 +208,7 @@ class SDFMzSearcher:
             All annotation candidates within ppm tolerance.
         """
 
-        if _is_iterable_mz(mz):
-            mz_values = [float(x) for x in mz]
-        else:
-            mz_values = [float(mz)]
+        mz_values = [float(x) for x in mz] if _is_iterable_mz(mz) else [float(mz)]
 
         all_hits = []
 
@@ -216,25 +224,27 @@ class SDFMzSearcher:
                 all_hits.append(hits)
 
         if not all_hits:
-            return pd.DataFrame(columns=[
-                "query_mz",
-                "adduct",
-                "theoretical_mz",
-                "ppm_error",
-                "abs_ppm_error",
-                "neutral_mass",
-                "LM_ID",
-                "COMMON_NAME",
-                "SYSTEMATIC_NAME",
-                "ABBREVIATION",
-                "FORMULA",
-                "CATEGORY",
-                "MAIN_CLASS",
-                "SUB_CLASS",
-                "INCHI_KEY",
-                "HMDB_ID",
-                "KEGG_ID",
-                "PUBCHEM_CID",
-            ])
+            return pd.DataFrame(
+                columns=[
+                    "query_mz",
+                    "adduct",
+                    "theoretical_mz",
+                    "ppm_error",
+                    "abs_ppm_error",
+                    "neutral_mass",
+                    "LM_ID",
+                    "COMMON_NAME",
+                    "SYSTEMATIC_NAME",
+                    "ABBREVIATION",
+                    "FORMULA",
+                    "CATEGORY",
+                    "MAIN_CLASS",
+                    "SUB_CLASS",
+                    "INCHI_KEY",
+                    "HMDB_ID",
+                    "KEGG_ID",
+                    "PUBCHEM_CID",
+                ]
+            )
 
         return pd.concat(all_hits, ignore_index=True)

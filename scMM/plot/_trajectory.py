@@ -1,140 +1,139 @@
-import numpy as np
-import pandas as pd
 import anndata as ad
+import numpy as np
 import palantir
-
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from typing import Optional, Union
-from scipy.stats import spearmanr
+import pandas as pd
 from scipy.spatial.distance import pdist, squareform
+from scipy.stats import spearmanr
 from sklearn.cluster import AgglomerativeClustering, KMeans
-import umap
+
 
 def run_palantir(
-        adata: ad.AnnData,
-        start_idx: int,
-        terminal_states: Optional[list[Union[int, str]]] = None,
-        n_diff_components: int = 10,
-        knn: int = 30,
-        num_waypoints: int = 500,
-        scale_components: bool = True,
-        max_iterations: int = 25,
-        seed: int = 42,
-        use_early_cell_as_start: bool = True,
-        store_prefix: str = "palantir",
-    ):
-        if not (0 <= start_idx < adata.n_obs):
-            raise IndexError(f"start_idx out of range: {start_idx}")
+    adata: ad.AnnData,
+    start_idx: int,
+    terminal_states: list[int | str] | None = None,
+    n_diff_components: int = 10,
+    knn: int = 30,
+    num_waypoints: int = 500,
+    scale_components: bool = True,
+    max_iterations: int = 25,
+    seed: int = 42,
+    use_early_cell_as_start: bool = True,
+    store_prefix: str = "palantir",
+):
+    if not (0 <= start_idx < adata.n_obs):
+        raise IndexError(f"start_idx out of range: {start_idx}")
 
-        data_df = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names)
-        internal_index = data_df.index
-        early_cell = internal_index[start_idx]
+    data_df = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names)
+    internal_index = data_df.index
+    early_cell = internal_index[start_idx]
 
-        if terminal_states is not None:
-            terminal_states_internal = []
-            for x in terminal_states:
-                if isinstance(x, int):
-                    if not (0 <= x < adata.n_obs):
-                        raise IndexError(f"terminal state index out of range: {x}")
-                    terminal_states_internal.append(internal_index[x])
-                else:
-                    matches = np.where(adata.obs_names == x)[0]
-                    if len(matches) == 0:
-                        raise KeyError(f"terminal state name not found: {x}")
-                    terminal_states_internal.append(internal_index[matches[0]])
-            terminal_states = terminal_states_internal
+    if terminal_states is not None:
+        terminal_states_internal = []
+        for x in terminal_states:
+            if isinstance(x, int):
+                if not (0 <= x < adata.n_obs):
+                    raise IndexError(f"terminal state index out of range: {x}")
+                terminal_states_internal.append(internal_index[x])
+            else:
+                matches = np.where(adata.obs_names == x)[0]
+                if len(matches) == 0:
+                    raise KeyError(f"terminal state name not found: {x}")
+                terminal_states_internal.append(internal_index[matches[0]])
+        terminal_states = terminal_states_internal
 
-        dm_res = palantir.utils.run_diffusion_maps(
-            data_df,
-            n_components=n_diff_components,
-            knn=knn,
-            seed=seed,
-        )
+    dm_res = palantir.utils.run_diffusion_maps(
+        data_df,
+        n_components=n_diff_components,
+        knn=knn,
+        seed=seed,
+    )
 
-        n_eigs = min(n_diff_components + 1, dm_res["EigenVectors"].shape[1])
-        if n_eigs < 2:
-            raise ValueError("Too few diffusion eigenvectors were produced.")
+    n_eigs = min(n_diff_components + 1, dm_res["EigenVectors"].shape[1])
+    if n_eigs < 2:
+        raise ValueError("Too few diffusion eigenvectors were produced.")
 
-        ms_data = palantir.utils.determine_multiscale_space(
-            dm_res,
-            n_eigs=n_eigs,
-        )
+    ms_data = palantir.utils.determine_multiscale_space(
+        dm_res,
+        n_eigs=n_eigs,
+    )
 
-        pr_res = palantir.core.run_palantir(
-            ms_data,
-            early_cell=early_cell,
-            terminal_states=terminal_states,
-            knn=knn,
-            num_waypoints=num_waypoints,
-            scale_components=scale_components,
-            max_iterations=max_iterations,
-            use_early_cell_as_start=use_early_cell_as_start,
-            seed=seed,
-        )
+    pr_res = palantir.core.run_palantir(
+        ms_data,
+        early_cell=early_cell,
+        terminal_states=terminal_states,
+        knn=knn,
+        num_waypoints=num_waypoints,
+        scale_components=scale_components,
+        max_iterations=max_iterations,
+        use_early_cell_as_start=use_early_cell_as_start,
+        seed=seed,
+    )
 
-        pseudotime = pr_res.pseudotime.reindex(internal_index)
-        adata.obs[f"{store_prefix}_pseudotime"] = pseudotime.to_numpy()
+    pseudotime = pr_res.pseudotime.reindex(internal_index)
+    adata.obs[f"{store_prefix}_pseudotime"] = pseudotime.to_numpy()
 
-        entropy = getattr(pr_res, "entropy", None)
-        if entropy is not None:
-            entropy = entropy.reindex(internal_index)
-            adata.obs[f"{store_prefix}_entropy"] = entropy.to_numpy()
+    entropy = getattr(pr_res, "entropy", None)
+    if entropy is not None:
+        entropy = entropy.reindex(internal_index)
+        adata.obs[f"{store_prefix}_entropy"] = entropy.to_numpy()
 
-        branch_probs = pr_res.branch_probs.reindex(internal_index)
-        adata.obsm[f"{store_prefix}_branch_probs"] = branch_probs.to_numpy()
-        adata.uns[f"{store_prefix}_branch_names"] = list(branch_probs.columns)
+    branch_probs = pr_res.branch_probs.reindex(internal_index)
+    adata.obsm[f"{store_prefix}_branch_probs"] = branch_probs.to_numpy()
+    adata.uns[f"{store_prefix}_branch_names"] = list(branch_probs.columns)
 
-        adata.obsm[f"{store_prefix}_ms_data"] = ms_data.reindex(internal_index).to_numpy()
-        adata.uns[f"{store_prefix}_ms_columns"] = list(ms_data.columns)
+    adata.obsm[f"{store_prefix}_ms_data"] = ms_data.reindex(internal_index).to_numpy()
+    adata.uns[f"{store_prefix}_ms_columns"] = list(ms_data.columns)
 
-        adata.uns[f"{store_prefix}_cell_index_map"] = pd.DataFrame({
+    adata.uns[f"{store_prefix}_cell_index_map"] = pd.DataFrame(
+        {
             "internal_id": internal_index.astype(str),
             "obs_name": adata.obs_names.astype(str),
             "obs_pos": np.arange(adata.n_obs),
-        })
-
-        terminal_states_out = getattr(pr_res, "terminal_states", None)
-        if terminal_states_out is not None:
-            adata.uns[f"{store_prefix}_terminal_states_internal"] = list(terminal_states_out)
-
-        waypoints = getattr(pr_res, "waypoints", None)
-        if waypoints is not None:
-            adata.uns[f"{store_prefix}_waypoints_internal"] = list(waypoints)
-
-        adata.uns[f"{store_prefix}_params"] = {
-            "source": "X",
-            "start_idx": int(start_idx),
-            "early_cell_internal": str(early_cell),
-            "n_diff_components": int(n_diff_components),
-            "knn": int(knn),
-            "num_waypoints": int(num_waypoints),
-            "scale_components": bool(scale_components),
-            "max_iterations": int(max_iterations),
-            "use_early_cell_as_start": bool(use_early_cell_as_start),
-            "seed": int(seed),
         }
+    )
 
-        return adata
-    
+    terminal_states_out = getattr(pr_res, "terminal_states", None)
+    if terminal_states_out is not None:
+        adata.uns[f"{store_prefix}_terminal_states_internal"] = list(terminal_states_out)
+
+    waypoints = getattr(pr_res, "waypoints", None)
+    if waypoints is not None:
+        adata.uns[f"{store_prefix}_waypoints_internal"] = list(waypoints)
+
+    adata.uns[f"{store_prefix}_params"] = {
+        "source": "X",
+        "start_idx": int(start_idx),
+        "early_cell_internal": str(early_cell),
+        "n_diff_components": int(n_diff_components),
+        "knn": int(knn),
+        "num_waypoints": int(num_waypoints),
+        "scale_components": bool(scale_components),
+        "max_iterations": int(max_iterations),
+        "use_early_cell_as_start": bool(use_early_cell_as_start),
+        "seed": int(seed),
+    }
+
+    return adata
+
+
 def resample_trajectory(
-        adata: ad.AnnData,
-        window_size: int = 100,
-        step_size: int = 50,
-        cell_dist_key: str = "X_umap",
-        parameterization_key: str = "palantir_pseudotime",
-        branch_prob_key: str = "palantir_branch_probs",
-        store_key: str = "trajectory",
-        min_cells_per_window: int = 5,
-        **kwargs
-    ):
+    adata: ad.AnnData,
+    window_size: int = 100,
+    step_size: int = 50,
+    cell_dist_key: str = "X_umap",
+    parameterization_key: str = "palantir_pseudotime",
+    branch_prob_key: str = "palantir_branch_probs",
+    store_key: str = "trajectory",
+    min_cells_per_window: int = 5,
+    **kwargs,
+):
     points = np.asarray(adata.obsm[cell_dist_key], dtype=float)
     time = np.asarray(adata.obs[parameterization_key].to_numpy(), dtype=float)
-    
+
     order = np.argsort(time)
     points_sorted = points[order]
     time_sorted = time[order]
-    
+
     n_traj_points = max(1, (len(adata) - window_size) // step_size + 1)
     branch_prob = adata.obsm.get(branch_prob_key, None)
     if branch_prob is not None:
@@ -146,7 +145,7 @@ def resample_trajectory(
     else:
         branch_prob_sorted = np.ones((adata.n_obs, 1), dtype=float)
         n_branches = 1
-        
+
     starts = list(range(0, max(1, adata.n_obs - window_size + 1), step_size))
     if len(starts) == 0:
         starts = [0]
@@ -158,7 +157,7 @@ def resample_trajectory(
     traj_points = np.full((n_branches, n_traj_points, points.shape[1]), np.nan, dtype=float)
     traj_time = np.full((n_branches, n_traj_points), np.nan, dtype=float)
     traj_counts = np.zeros((n_branches, n_traj_points), dtype=int)
-    
+
     traj_weight_sum = np.full((n_branches, n_traj_points), np.nan, dtype=float)
 
     for i, start in enumerate(starts):
@@ -196,12 +195,13 @@ def resample_trajectory(
     adata.uns[store_key] = traj_points
     return adata
 
+
 def metabolic_velocity_field(
-        adata: ad.AnnData,
-        window_size: int = 100,
-        step_size: int = 50,
-        parameterization_key: str = "time"
-    ):
+    adata: ad.AnnData,
+    window_size: int = 100,
+    step_size: int = 50,
+    parameterization_key: str = "time",
+):
     if parameterization_key not in adata.obs:
         raise KeyError(f"{parameterization_key} not found in adata.obs")
 
@@ -242,8 +242,8 @@ def metabolic_velocity_field(
     for i, start in enumerate(starts):
         end = min(start + window_size, n_obs)
 
-        Xw = X_sorted[start:end]      # (k, m)
-        tw = t_sorted[start:end]      # (k,)
+        Xw = X_sorted[start:end]  # (k, m)
+        tw = t_sorted[start:end]  # (k,)
         k = len(tw)
 
         if k < 2:
@@ -252,7 +252,7 @@ def metabolic_velocity_field(
         t0 = tw.mean()
         dt = tw - t0
 
-        denom = np.sum(dt ** 2)
+        denom = np.sum(dt**2)
         if denom <= 0:
             continue
 
@@ -266,22 +266,19 @@ def metabolic_velocity_field(
         speeds[i] = np.linalg.norm(drdt)
         counts[i] = k
 
-    result = {
-        "velocity_field": velocity_vectors,
-        "speeds": speeds,
-        "time_centers": time_centers
-    }
+    result = {"velocity_field": velocity_vectors, "speeds": speeds, "time_centers": time_centers}
     adata.uns["metabolic_velocity"] = result
     return adata
 
+
 def metabolite_trends(
-        adata: ad.AnnData,
-        parameterization_key: str = "time",
-        window_size: int = 100,
-        step_size: int = 50,
-        kernel_stat: str = "median",
-        feature_name_key: Optional[str] = None,
-    ):
+    adata: ad.AnnData,
+    parameterization_key: str = "time",
+    window_size: int = 100,
+    step_size: int = 50,
+    kernel_stat: str = "median",
+    feature_name_key: str | None = None,
+):
 
     if parameterization_key not in adata.obs:
         raise KeyError(f"{parameterization_key} not found in adata.obs")
@@ -399,10 +396,10 @@ def metabolite_trends(
     rank_idx = np.argsort(rank_score)
 
     result = {
-        "pooled": pooled,                   # (n_windows, n_feat)
-        "time_centers": time_centers,       # (n_windows,)
-        "counts": counts,                   # (n_windows,)
-        "rho": rho,                         # Spearman correlation
+        "pooled": pooled,  # (n_windows, n_feat)
+        "time_centers": time_centers,  # (n_windows,)
+        "counts": counts,  # (n_windows,)
+        "rho": rho,  # Spearman correlation
         "pval": pval,
         "qval": qval,
         "feature_names": feature_names,
@@ -417,17 +414,15 @@ def metabolite_trends(
     adata.uns["metabolite_trends"] = result
     return adata
 
+
 def trend_cluster(
-        trends: np.ndarray,
-        metric: str = "correlation",
-        cluster_method: str = "leiden",
-        **kwargs
-    ):
+    trends: np.ndarray, metric: str = "correlation", cluster_method: str = "leiden", **kwargs
+):
     trends = np.asarray(trends, dtype=float)
     if trends.ndim != 2:
         raise ValueError("trends must be a 2D array of shape (n_points, n_features)")
 
-    n_points, n_features = trends.shape
+    _n_points, n_features = trends.shape
     if n_features < 2:
         return np.zeros(n_features, dtype=int)
 
@@ -488,7 +483,7 @@ def trend_cluster(
         weights = []
 
         for i in range(n_features):
-            nn_idx = np.argsort(D[i])[1:n_neighbors + 1]  # skip self
+            nn_idx = np.argsort(D[i])[1 : n_neighbors + 1]  # skip self
             for j in nn_idx:
                 a, b = sorted((i, int(j)))
                 edges.add((a, b))

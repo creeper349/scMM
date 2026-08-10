@@ -1,5 +1,7 @@
-from decorator import *
-from .normalize import normalize
-from .annotation import SDFMzSearcher
+"""Public utility helpers."""
 
-__all__ = ["timer", "normalize", "SDFMzSearcher"]
+from .annotation import SDFMzSearcher
+from .normalize import normalize
+from .tool import timer
+
+__all__ = ["SDFMzSearcher", "normalize", "timer"]

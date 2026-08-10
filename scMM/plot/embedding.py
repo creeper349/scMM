@@ -1,19 +1,22 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE, Isomap, LocallyLinearEmbedding
-from sklearn.cluster import DBSCAN
 from umap import UMAP
-from typing import Optional
+
 from ..file.data import CyESIData
 
 DIM_REGISTRY = {}
+
 
 def register_dim(name):
     def wrapper(func):
         DIM_REGISTRY[name] = func
         return func
+
     return wrapper
+
 
 @register_dim("umap")
 def run_umap(X, dim):
@@ -23,36 +26,31 @@ def run_umap(X, dim):
         "min_dist": 0.1,
         "n_components": 2,
         "metric": "euclidean",
-        "random_state": 42
+        "random_state": 42,
     }
     params.update(dim)
 
     model = UMAP(**params)
     return model.fit_transform(X)
 
+
 @register_dim("pca")
 def run_pca(X, dim):
 
-    params = {
-        "n_components": 2,
-        "svd_solver": "auto"
-    }
+    params = {"n_components": 2, "svd_solver": "auto"}
     params.update(dim)
 
     return PCA(**params).fit_transform(X)
 
+
 @register_dim("isomap")
 def run_isomap(X, dim):
 
-    params = {
-        "n_components": 2,
-        "n_neighbors": 15,
-        "metric": "euclidean",
-        "path_method": "auto"
-    }
+    params = {"n_components": 2, "n_neighbors": 15, "metric": "euclidean", "path_method": "auto"}
     params.update(dim)
 
     return Isomap(**params).fit_transform(X)
+
 
 @register_dim("tsne")
 def run_tsne(X, dim):
@@ -62,23 +60,21 @@ def run_tsne(X, dim):
         "perplexity": 30,
         "learning_rate": "auto",
         "init": "pca",
-        "random_state": 42
+        "random_state": 42,
     }
     params.update(dim)
 
     return TSNE(**params).fit_transform(X)
 
+
 @register_dim("lle")
 def run_LLE(X, dim):
 
-    params = {
-        "n_components": 2,
-        "n_neighbors": 15,
-        "method": "standard"
-    }
+    params = {"n_components": 2, "n_neighbors": 15, "method": "standard"}
     params.update(dim)
 
     return LocallyLinearEmbedding(**params).fit_transform(X)
+
 
 def _run_dim_reduction(X, method, dim):
     if method not in DIM_REGISTRY:
@@ -86,17 +82,20 @@ def _run_dim_reduction(X, method, dim):
 
     return DIM_REGISTRY[method](X, dim)
 
-def dimension_reduction(data:CyESIData | np.ndarray, 
-                        method:str = "pca",
-                        ax: plt.Axes = None,
-                        reduce_kwargs:dict = None,
-                        color:np.ndarray | str | None = "categorical",
-                        categorical_mapping: Optional[dict] = None,
-                        cluster_kwargs:dict = None, 
-                        plot_kwargs:dict = None):
+
+def dimension_reduction(
+    data: CyESIData | np.ndarray,
+    method: str = "pca",
+    ax: plt.Axes = None,
+    reduce_kwargs: dict | None = None,
+    color: np.ndarray | str | None = "categorical",
+    categorical_mapping: dict | None = None,
+    cluster_kwargs: dict | None = None,
+    plot_kwargs: dict | None = None,
+):
     """
     A function interface for unsupervised dimension reduction and visualization.
-    
+
     :param data: Processed CyESI single cell metabolism data
     :type data: CyESIData
     :param method: Dimension reduction method, could be "pca", "umap", "tsne", "isomap", "lle".
@@ -109,7 +108,7 @@ def dimension_reduction(data:CyESIData | np.ndarray,
     :param color: Method of coloring points. Using np.ndarray for continous values, "categorical" for
     coloring with file names, "cluster" for unsupervised clustering and None for single color.
     :type color: np.ndarray | str | None
-    :param categorical_mapping: Mapping to transfer file names to class labels, 
+    :param categorical_mapping: Mapping to transfer file names to class labels,
     e.g. {"file_1":positive, "file_2":negative}
     :type categorical_mapping: Optional[dict]
     :param cluster_kwargs: Parameters for unsupervised clustering. Use only when color = "cluster".
@@ -121,11 +120,9 @@ def dimension_reduction(data:CyESIData | np.ndarray,
     plot_kwargs = plot_kwargs or {}
     X = data.data if isinstance(data, CyESIData) else data
     emb = _run_dim_reduction(X, method, reduce_kwargs)
-    
+
     if ax is None:
-        fig, ax = plt.subplots(
-            figsize=plot_kwargs.get("figsize", (6, 6))
-        )
+        _fig, ax = plt.subplots(figsize=plot_kwargs.get("figsize", (6, 6)))
 
     x = emb[:, 0]
     y = emb[:, 1]
@@ -145,21 +142,10 @@ def dimension_reduction(data:CyESIData | np.ndarray,
 
         for i, u in enumerate(uniq):
             mask = classes == u
-            ax.scatter(
-                x[mask],
-                y[mask],
-                s=s,
-                alpha=alpha,
-                label=str(u),
-                color=cmap(i % cmap.N)
-            )
+            ax.scatter(x[mask], y[mask], s=s, alpha=alpha, label=str(u), color=cmap(i % cmap.N))
 
         if plot_kwargs.get("legend", True):
-            ax.legend(
-                title=plot_kwargs.get("legend_title", "Class"),
-                markerscale=2,
-                frameon=False
-            )
+            ax.legend(title=plot_kwargs.get("legend_title", "Class"), markerscale=2, frameon=False)
 
     elif isinstance(color, np.ndarray):
         cmap = plot_kwargs.get("cmap", "viridis")
@@ -172,7 +158,7 @@ def dimension_reduction(data:CyESIData | np.ndarray,
             alpha=alpha,
             cmap=cmap,
             vmin=plot_kwargs.get("vmin"),
-            vmax=plot_kwargs.get("vmax")
+            vmax=plot_kwargs.get("vmax"),
         )
 
         if plot_kwargs.get("colorbar", True):
@@ -194,5 +180,5 @@ def dimension_reduction(data:CyESIData | np.ndarray,
         "method": method,
         "reduce_params": reduce_kwargs,
         "plot_params": plot_kwargs,
-        "ax": ax
+        "ax": ax,
     }

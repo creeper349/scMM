@@ -1,9 +1,11 @@
+from contextlib import suppress
+
 import numpy as np
 import pandas as pd
 import pyopenms as oms
-from .denoise import peak_recon, r1_decomposition
-from scipy.ndimage import median_filter, label
 from joblib import Parallel, delayed
+from scipy.ndimage import label, median_filter
+
 
 def filter_spectrum(
     spec: oms.MSSpectrum,
@@ -13,7 +15,7 @@ def filter_spectrum(
     snr_threshold: float = 3.0,
     keep_negative: bool = False,
     return_snr: bool = False,
-    baseline_stride: int = 10,  
+    baseline_stride: int = 10,
 ):
     mz, intensity = spec.get_peaks()
 
@@ -61,9 +63,7 @@ def filter_spectrum(
             anchor_baseline[j] = np.quantile(intensity[left:right], baseline_quantile)
 
         baseline = np.interp(
-            np.arange(n, dtype=np.float64),
-            anchor_idx.astype(np.float64),
-            anchor_baseline
+            np.arange(n, dtype=np.float64), anchor_idx.astype(np.float64), anchor_baseline
         )
 
     residual = intensity - baseline
@@ -94,27 +94,35 @@ def filter_spectrum(
     out_spec.setRT(spec.getRT())
     out_spec.setMSLevel(spec.getMSLevel())
 
-    try:
+    with suppress(Exception):
         out_spec.setName(spec.getName())
-    except Exception:
-        pass
 
-    try:
+    with suppress(Exception):
         out_spec.setDriftTime(spec.getDriftTime())
-    except Exception:
-        pass
 
     if return_snr:
         return out_spec, snr
     return out_spec
 
-def _filter(data:np.ndarray, size:int = 10, filter = median_filter, **filter_kwargs):
-    return filter(data, size = (size, 1), **filter_kwargs)
 
-def find_cell_peaks(data: pd.DataFrame, ref_mz: float, baseline_filter=median_filter, baseline_filter_size: int = 15,
-                    cell_snr: float = 5.0, peak_snr: float = 3.0, dtype=np.float64, baseline_stat="median",
-                    max_zero_frac: float = 0.9, n_jobs: int = -1, **kwargs):
-    
+def _filter(data: np.ndarray, size: int = 10, filter=median_filter, **filter_kwargs):
+    return filter(data, size=(size, 1), **filter_kwargs)
+
+
+def find_cell_peaks(
+    data: pd.DataFrame,
+    ref_mz: float,
+    baseline_filter=median_filter,
+    baseline_filter_size: int = 15,
+    cell_snr: float = 5.0,
+    peak_snr: float = 3.0,
+    dtype=np.float64,
+    baseline_stat="median",
+    max_zero_frac: float = 0.9,
+    n_jobs: int = -1,
+    **kwargs,
+):
+
     X = data.values.astype(dtype)
     mz_values = data.columns.astype(dtype)
     B = _filter(X, size=baseline_filter_size, filter=baseline_filter, **kwargs)
