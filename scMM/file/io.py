@@ -472,9 +472,10 @@ def pack_specs(spec_list, reset_rt=True, rt_step=1.0):
     exp = oms.MSExperiment()
 
     for i, spec in enumerate(spec_list):
-        if not isinstance(spec, oms.MSSpectrum):
-            raise TypeError("spec_list must contain only MSSpectrum objects")
-        spec_copy = oms.MSSpectrum(spec)
+        try:
+            spec_copy = oms.MSSpectrum(spec)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("spec_list must contain only MSSpectrum-compatible objects") from exc
 
         if reset_rt:
             spec_copy.setRT(i * rt_step)
@@ -487,13 +488,17 @@ def pack_specs(spec_list, reset_rt=True, rt_step=1.0):
 def save_spectra(spectra, output_path: str | Path) -> Path:
     """Save a spectrum or sequence of spectra as mzML."""
     exp = oms.MSExperiment()
-    if isinstance(spectra, oms.MSSpectrum):
-        exp.addSpectrum(spectra)
+    if hasattr(spectra, "get_peaks") and hasattr(spectra, "getMSLevel"):
+        try:
+            exp.addSpectrum(spectra)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("spectra must be MSSpectrum-compatible") from exc
     elif isinstance(spectra, Sequence) and not isinstance(spectra, (str, bytes)):
         for spec in spectra:
-            if not isinstance(spec, oms.MSSpectrum):
-                raise TypeError("Every item in spectra must be an MSSpectrum")
-            exp.addSpectrum(spec)
+            try:
+                exp.addSpectrum(spec)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("Every item in spectra must be MSSpectrum-compatible") from exc
     else:
         raise TypeError("spectra must be an MSSpectrum or a sequence of MSSpectrum objects")
 

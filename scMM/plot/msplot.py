@@ -9,7 +9,7 @@ from matplotlib.ticker import AutoMinorLocator
 
 def eic(
     ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time: pd.Series | None = None
-) -> plt.Axes:
+) -> tuple[plt.Axes, tuple[np.ndarray | pd.Index, pd.Series]]:
     if not np.isfinite(mz) or mz <= 0:
         raise ValueError("mz must be a positive finite number")
     if ppm_tol < 0:
@@ -115,6 +115,10 @@ def plot_spectrum(
     mz = np.asarray(mz, dtype=float)
     inten = np.asarray(inten, dtype=float)
 
+    finite = np.isfinite(mz) & np.isfinite(inten)
+    mz = mz[finite]
+    inten = inten[finite]
+
     order = np.argsort(mz)
     mz = mz[order]
     inten = inten[order]
@@ -138,7 +142,13 @@ def plot_spectrum(
         fig = ax.figure
 
     ax.plot(mz, inten, linewidth=linewidth, color=kwargs.get("color", "black"))
-    ax.set_xlim(mz_range if mz_range is not None else (np.min(mz), np.max(mz)))
+    if mz_range is not None:
+        x_limits = mz_range
+    else:
+        x_min, x_max = float(np.min(mz)), float(np.max(mz))
+        padding = max(abs(x_min) * 1e-6, 1e-6) if x_min == x_max else 0.0
+        x_limits = (x_min - padding, x_max + padding)
+    ax.set_xlim(x_limits)
     ax.set_xlabel("m/z")
     ax.set_ylabel("Relative Intensity" if normalize else "Intensity")
     ax.xaxis.set_minor_locator(AutoMinorLocator(10))
@@ -149,7 +159,8 @@ def plot_spectrum(
     if intensity_range is not None:
         ax.set_ylim(*intensity_range)
     else:
-        ax.set_ylim(0, np.max(inten) * 1.05)
+        y_max = float(np.max(inten))
+        ax.set_ylim(0, y_max * 1.05 if y_max > 0 else 1.0)
 
     if top_n_labels and top_n_labels > 0:
         idx_sorted = np.argsort(inten)[::-1]
