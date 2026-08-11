@@ -103,3 +103,54 @@ def test_deisotope_removes_correlated_isotope() -> None:
     assert list(dataset.data.columns) == [100.0, 150.0]
     assert dataset.file_meta["deisotope"]["n_removed_features"] == 1
     assert dataset.feature_meta.loc[100.0, "n_isotope_children"] == 1
+
+
+def test_deisotope_audit_does_not_mutate_dataset() -> None:
+    parent = np.array([100.0, 200.0, 300.0, 400.0])
+    dataset = make_dataset(
+        "sample",
+        np.column_stack([parent, parent * 0.05, parent * 0.002]).tolist(),
+        [100.0, 101.003355, 102.00671],
+    )
+    original_data = dataset.data.copy()
+    original_feature_meta = dataset.feature_meta.copy()
+    original_file_meta = dataset.file_meta.copy()
+
+    audit = dataset.deisotope(
+        ppm_tol=1.0,
+        r_square_threshold=0.99,
+        merge_mode="sum",
+        remove=False,
+        inplace=False,
+    )
+
+    pd.testing.assert_frame_equal(dataset.data, original_data)
+    pd.testing.assert_frame_equal(dataset.feature_meta, original_feature_meta)
+    assert dataset.file_meta == original_file_meta
+    assert not hasattr(dataset, "deisotope_result")
+
+    assert audit["isotope_features"] == [101.003355, 102.00671]
+    assert audit["final_table"]["isotope_order"].tolist() == [1, 2]
+    np.testing.assert_allclose(
+        audit["processed_data"][100.0],
+        original_data[100.0] + original_data[101.003355] + original_data[102.00671],
+    )
+    assert audit["feature_meta"].loc[100.0, "n_isotope_children"] == 2
+    assert audit["feature_meta"].loc[101.003355, "deisotope_role"] == "isotope"
+
+
+def test_deisotope_builds_missing_feature_metadata_without_side_effects() -> None:
+    dataset = make_dataset("sample", [[1.0, 0.05], [2.0, 0.1]], [100.0, 101.003355])
+    del dataset.feature_meta
+
+    audit = dataset.deisotope(ppm_tol=1.0, inplace=False)
+
+    assert not hasattr(dataset, "feature_meta")
+    assert audit["feature_meta"]["mz"].tolist() == [100.0]
+
+
+def test_deisotope_rejects_invalid_missing_mask_shape() -> None:
+    dataset = make_dataset("sample", [[1.0, 0.05], [2.0, 0.1]], [100.0, 101.003355])
+
+    with pytest.raises(ValueError, match="same shape"):
+        dataset.deisotope(missing_func=lambda values: values[:, 0], inplace=False)

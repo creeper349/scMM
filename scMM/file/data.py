@@ -1,6 +1,5 @@
 import json
 import logging
-import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -16,6 +15,7 @@ from sklearn.impute import KNNImputer, SimpleImputer
 from ..util.annotation import SDFMzSearcher
 from ..util.normalize import normalize
 from ..util.peak import filter_spectrum, find_cell_peaks
+from ._deisotope import DeisotopeParams, analyze_isotopes, zero_is_missing
 from .io import (
     align_frame,
     extract_peaks,
@@ -27,10 +27,6 @@ from .io import (
 
 DebugHook = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
-
-
-def _zero_is_missing(values: np.ndarray) -> np.ndarray:
-    return values == 0
 
 
 def _align_frame_from_file(file_path: str, mz_list, ppm_tol: int = 10, dtype=np.float64):
@@ -486,288 +482,49 @@ class CyESIData:
         carbon13_abundance: float = 0.0109,
         intensity_threshold: float = 0.0,
         safety_factor: float = 1.0,
-        missing_func: Callable[[np.ndarray], np.ndarray] = _zero_is_missing,
+        missing_func: Callable[[np.ndarray], np.ndarray] = zero_is_missing,
         merge_mode: str = "keep_parent",
         remove: bool = True,
         inplace: bool = True,
     ):
-        if self.data.shape[1] == 0:
-            raise ValueError("Cannot deisotope a dataset without features")
-        if isotope_diff <= 0:
-            raise ValueError("isotope_diff must be positive")
-        if ppm_tol < 0:
-            raise ValueError("ppm_tol must be non-negative")
-        if max_isotope_order < 1:
-            raise ValueError("max_isotope_order must be at least 1")
-        if not 0 <= r_square_threshold <= 1:
-            raise ValueError("r_square_threshold must be between 0 and 1")
-        if not 0 < carbon13_abundance < 1:
-            raise ValueError("carbon13_abundance must be between 0 and 1")
-        if safety_factor <= 0:
-            raise ValueError("safety_factor must be positive")
-        if merge_mode not in {"keep_parent", "sum"}:
-            raise ValueError("merge_mode must be either 'keep_parent' or 'sum'.")
+        """Detect isotope pairs and optionally apply the processed feature set.
 
-        df = self.data
-        mz = df.columns.astype(float).to_numpy()
-        n_features = len(mz)
-
-        # ---------- ensure feature_meta ----------
-        if not hasattr(self, "feature_meta") or self.feature_meta is None:
-            self.feature_meta = pd.DataFrame(index=df.columns)
-
-        self.feature_meta = self.feature_meta.reindex(df.columns)
-
-        if "mz" not in self.feature_meta.columns:
-            self.feature_meta["mz"] = mz
-
-        # ---------- Step 1: m/z candidate search ----------
-        dmz = mz[None, :] - mz[:, None]
-
-        isotope_order = np.rint(dmz / isotope_diff).astype(int)
-        expected_dmz = isotope_order * isotope_diff
-
-        ppm_error = np.abs(dmz - expected_dmz) / mz[:, None] * 1e6
-
-        candidate_mask = (
-            (isotope_order >= 1)
-            & (isotope_order <= max_isotope_order)
-            & (dmz > 0)
-            & (ppm_error <= ppm_tol)
+        ``inplace=False`` returns a complete audit dictionary without changing
+        the dataset.  Numerical detection and metadata assembly live in the
+        dedicated ``_deisotope`` module; this method only manages container
+        state and provenance.
+        """
+        params = DeisotopeParams(
+            isotope_diff=isotope_diff,
+            ppm_tol=ppm_tol,
+            max_isotope_order=max_isotope_order,
+            r_square_threshold=r_square_threshold,
+            carbon13_abundance=carbon13_abundance,
+            intensity_threshold=intensity_threshold,
+            safety_factor=safety_factor,
+            merge_mode=merge_mode,
+            remove=remove,
         )
-
-        candidate_rows, candidate_cols = np.where(candidate_mask)
-
-        candidate_table = pd.DataFrame(
-            {
-                "parent_index": candidate_rows,
-                "isotope_index": candidate_cols,
-                "parent_feature": df.columns[candidate_rows],
-                "isotope_feature": df.columns[candidate_cols],
-                "parent_mz": mz[candidate_rows],
-                "isotope_mz": mz[candidate_cols],
-                "isotope_order": isotope_order[candidate_rows, candidate_cols],
-                "ppm_error": ppm_error[candidate_rows, candidate_cols],
-            }
+        result = analyze_isotopes(
+            self.data,
+            getattr(self, "feature_meta", None),
+            params,
+            missing_func,
         )
-
-        candidate_map = {
-            str(df.columns[i]): [str(x) for x in df.columns[candidate_mask[i]]]
-            for i in range(n_features)
-            if np.any(candidate_mask[i])
-        }
-
-        # ---------- Step 2: through-origin regression ----------
-        X_raw = df.to_numpy(dtype=float)
-
-        missing = missing_func(X_raw)
-        missing = np.asarray(missing, dtype=bool)
-
-        if missing.shape != X_raw.shape:
-            raise ValueError(
-                "missing_func must return a boolean array with the same shape as input data."
-            )
-
-        missing = missing | np.isnan(X_raw) | np.isinf(X_raw)
-
-        if intensity_threshold > 0:
-            missing = missing | (X_raw <= intensity_threshold)
-
-        valid = ~missing
-
-        X = X_raw.copy()
-        X[missing] = 0.0
-
-        G = X.T @ X
-        X2 = X**2
-        V = valid.astype(float)
-
-        ss_x_pair = X2.T @ V
-        ss_y_pair = V.T @ X2
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            A = G / ss_x_pair
-            R = (G**2) / (ss_x_pair * ss_y_pair)
-
-        A[~np.isfinite(A)] = np.nan
-        R[~np.isfinite(R)] = np.nan
-
-        A_df = pd.DataFrame(A, index=df.columns, columns=df.columns)
-        R_df = pd.DataFrame(R, index=df.columns, columns=df.columns)
-
-        # ---------- Step 3: R^2 filtering ----------
-        r2_mask = candidate_mask & (r_square_threshold <= R)
-
-        # ---------- Step 4: isotope upper-bound filtering ----------
-        nC_max = np.floor(mz / 12.0).astype(int)
-        q = carbon13_abundance / (1.0 - carbon13_abundance)
-
-        ratio_limit = np.full_like(A, np.nan, dtype=float)
-
-        for k in range(1, max_isotope_order + 1):
-            limits_k = np.zeros(n_features, dtype=float)
-
-            for i in range(n_features):
-                if nC_max[i] >= k:
-                    limits_k[i] = math.comb(int(nC_max[i]), k) * (q**k)
-                else:
-                    limits_k[i] = 0.0
-
-            mask_k = isotope_order == k
-            ratio_limit[mask_k] = np.broadcast_to(limits_k[:, None], ratio_limit.shape)[mask_k]
-
-        ratio_limit = ratio_limit * safety_factor
-        ratio_mask = ratio_limit >= A
-
-        final_mask_raw = r2_mask & ratio_mask
-
-        # ---------- Greedy low-m/z assignment ----------
-        final_mask = np.zeros_like(final_mask_raw, dtype=bool)
-        removed_indices = set()
-
-        for i in np.argsort(mz):
-            if i in removed_indices:
-                continue
-
-            js = np.where(final_mask_raw[i])[0]
-            js = sorted(js, key=lambda j: (isotope_order[i, j], mz[j]))
-
-            for j in js:
-                if j not in removed_indices:
-                    final_mask[i, j] = True
-                    removed_indices.add(j)
-
-        final_rows, final_cols = np.where(final_mask)
-
-        final_table = pd.DataFrame(
-            {
-                "parent_index": final_rows,
-                "isotope_index": final_cols,
-                "parent_feature": df.columns[final_rows],
-                "isotope_feature": df.columns[final_cols],
-                "parent_mz": mz[final_rows],
-                "isotope_mz": mz[final_cols],
-                "isotope_order": isotope_order[final_rows, final_cols],
-                "ppm_error": ppm_error[final_rows, final_cols],
-                "slope_A": A[final_rows, final_cols],
-                "r_square": R[final_rows, final_cols],
-                "max_allowed_ratio": ratio_limit[final_rows, final_cols],
-            }
-        )
-
-        isotope_features = df.columns[sorted(removed_indices)].tolist()
-        parent_features = df.columns[sorted(set(final_rows))].tolist()
-
-        # ---------- write isotope distribution into feature_meta ----------
-        fm = self.feature_meta.copy()
-
-        fm["deisotope_role"] = "unique"
-        fm.loc[parent_features, "deisotope_role"] = "parent"
-        fm.loc[isotope_features, "deisotope_role"] = "isotope"
-
-        fm["isotope_parent"] = pd.NA
-        fm["isotope_order"] = pd.NA
-        fm["isotope_slope_A"] = np.nan
-        fm["isotope_r_square"] = np.nan
-        fm["isotope_ppm_error"] = np.nan
-
-        fm["isotope_children"] = "[]"
-        fm["n_isotope_children"] = 0
-
-        for k in range(1, max_isotope_order + 1):
-            fm[f"M{k}_mz"] = np.nan
-            fm[f"M{k}_feature"] = pd.NA
-            fm[f"M{k}_slope_A"] = np.nan
-            fm[f"M{k}_r_square"] = np.nan
-            fm[f"M{k}_ppm_error"] = np.nan
-            fm[f"M{k}_max_allowed_ratio"] = np.nan
-
-        for _, row in final_table.iterrows():
-            parent = row["parent_feature"]
-            iso = row["isotope_feature"]
-            k = int(row["isotope_order"])
-
-            fm.loc[iso, "isotope_parent"] = parent
-            fm.loc[iso, "isotope_order"] = k
-            fm.loc[iso, "isotope_slope_A"] = row["slope_A"]
-            fm.loc[iso, "isotope_r_square"] = row["r_square"]
-            fm.loc[iso, "isotope_ppm_error"] = row["ppm_error"]
-
-            child_info = {
-                "feature": str(iso),
-                "mz": float(row["isotope_mz"]),
-                "order": k,
-                "slope_A": float(row["slope_A"]),
-                "r_square": float(row["r_square"]),
-                "ppm_error": float(row["ppm_error"]),
-                "max_allowed_ratio": float(row["max_allowed_ratio"]),
-            }
-
-            old_children = json.loads(fm.loc[parent, "isotope_children"])
-            old_children.append(child_info)
-            fm.loc[parent, "isotope_children"] = json.dumps(old_children, ensure_ascii=False)
-            fm.loc[parent, "n_isotope_children"] = len(old_children)
-
-            fm.loc[parent, f"M{k}_mz"] = row["isotope_mz"]
-            fm.loc[parent, f"M{k}_feature"] = iso
-            fm.loc[parent, f"M{k}_slope_A"] = row["slope_A"]
-            fm.loc[parent, f"M{k}_r_square"] = row["r_square"]
-            fm.loc[parent, f"M{k}_ppm_error"] = row["ppm_error"]
-            fm.loc[parent, f"M{k}_max_allowed_ratio"] = row["max_allowed_ratio"]
-
-        # ---------- Merge isotope intensities ----------
-        processed_data = df.copy()
-
-        if merge_mode == "sum":
-            for parent_idx, isotope_idx in zip(final_rows, final_cols, strict=True):
-                parent_col = df.columns[parent_idx]
-                isotope_col = df.columns[isotope_idx]
-
-                processed_data[parent_col] = processed_data[parent_col].fillna(0) + df[
-                    isotope_col
-                ].fillna(0)
-
-        if remove:
-            processed_data = processed_data.drop(columns=isotope_features)
-            fm = fm.loc[processed_data.columns].copy()
-
-        result = {
-            "candidate_map": candidate_map,
-            "candidate_table": candidate_table,
-            "A": A_df,
-            "R": R_df,
-            "ratio_limit": pd.DataFrame(ratio_limit, index=df.columns, columns=df.columns),
-            "final_table": final_table,
-            "isotope_features": isotope_features,
-            "parent_features": parent_features,
-            "processed_data": processed_data,
-            "feature_meta": fm,
-            "params": {
-                "isotope_diff": isotope_diff,
-                "ppm_tol": ppm_tol,
-                "max_isotope_order": max_isotope_order,
-                "r_square_threshold": r_square_threshold,
-                "carbon13_abundance": carbon13_abundance,
-                "intensity_threshold": intensity_threshold,
-                "safety_factor": safety_factor,
-                "merge_mode": merge_mode,
-                "remove": remove,
-            },
-        }
 
         if inplace:
             self.deisotope_result = result
-            self.data = processed_data
-            self.feature_meta = fm
+            self.data = result["processed_data"]
+            self.feature_meta = result["feature_meta"]
 
             if not hasattr(self, "file_meta") or self.file_meta is None:
                 self.file_meta = {}
 
             self.file_meta["deisotope"] = {
                 "params": result["params"],
-                "n_candidate_pairs": len(candidate_table),
-                "n_final_isotope_pairs": len(final_table),
-                "n_removed_features": len(isotope_features),
+                "n_candidate_pairs": len(result["candidate_table"]),
+                "n_final_isotope_pairs": len(result["final_table"]),
+                "n_removed_features": len(result["isotope_features"]),
                 "merge_mode": merge_mode,
             }
 

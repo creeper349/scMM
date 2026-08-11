@@ -79,6 +79,9 @@ accepted_pairs = audit["final_table"]
 ```
 
 `final_table` 包含母峰、子峰、同位素阶数、ppm 误差、回归斜率、R² 和允许的最大强度比。
+`inplace=False` 不会写入 `data`、`feature_meta`、`file_meta` 或 `deisotope_result`，因此适合先做参数
+审计。`merge_mode="sum"` 会把确认的子峰强度累加到母峰；是否从结果中删除子峰仍由 `remove`
+独立控制。
 
 ## 质量注释
 
