@@ -285,7 +285,9 @@ ax = result["ax"]
 | LLE | `n_components=2`, `n_neighbors=15`, `method="standard"` |
 
 `color="categorical"` 使用数据来源标签；`color="cluster"` 默认使用 DBSCAN，也可在
-`cluster_kwargs["method"]` 中传入兼容的聚类器；一维 NumPy 数组用于连续值着色。
+`cluster_kwargs["method"]` 中传入兼容的聚类器；一维 NumPy 数组用于连续值着色。接口会复制
+聚类参数后再取出 `method`，因此可以安全地复用调用方的参数字典；聚类器必须为每个观测返回一个
+标签。
 
 ## 原始谱与 EIC 绘图
 
@@ -346,6 +348,9 @@ fig, ax = plot_spectrum(
 | `label_fmt` | `{:.4f}` | m/z 标签格式 |
 | `figsize` | `(10, 4)` | 未传入轴时创建的图尺寸 |
 | `linewidth` | `1.0` | 谱线宽度 |
+
+绘图前会移除非有限峰并按 m/z 排序；归一化只使用 `mz_range` 内最终显示的峰。峰标签按强度选择，
+同时遵守 `exclusion_window`，避免在相邻峰上堆叠标注。
 
 ### 全局绘图样式
 

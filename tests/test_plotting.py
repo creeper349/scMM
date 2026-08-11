@@ -33,6 +33,29 @@ def test_plot_spectrum_validates_empty_range() -> None:
         plot_spectrum(spectrum, mz_range=(200.0, 300.0))
 
 
+def test_plot_spectrum_sorts_normalizes_and_separates_labels() -> None:
+    spectrum = SimpleNamespace(
+        get_peaks=lambda: (
+            np.array([105.0, np.nan, 100.0, 101.0]),
+            np.array([3.0, 99.0, 1.0, 5.0]),
+        )
+    )
+
+    fig, ax = plot_spectrum(
+        spectrum,
+        normalize=True,
+        top_n_labels=2,
+        exclusion_window=2.0,
+        label_fmt="{:.1f}",
+    )
+
+    np.testing.assert_allclose(ax.lines[0].get_xdata(), [100.0, 101.0, 105.0])
+    np.testing.assert_allclose(ax.lines[0].get_ydata(), [0.2, 1.0, 0.6])
+    assert [text.get_text() for text in ax.texts] == ["101.0", "105.0"]
+    assert ax.get_ylabel() == "Relative Intensity"
+    plt.close(fig)
+
+
 def test_dimension_reduction_cluster_mode_does_not_forward_method() -> None:
     class Clusterer:
         def __init__(self, expected: int):
@@ -44,15 +67,33 @@ def test_dimension_reduction_cluster_mode_does_not_forward_method() -> None:
 
     data = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 0.0], [3.0, 1.0]])
 
+    cluster_kwargs = {"method": Clusterer, "expected": 4}
     result = dimension_reduction(
         data,
         method="pca",
         color="cluster",
-        cluster_kwargs={"method": Clusterer, "expected": 4},
+        cluster_kwargs=cluster_kwargs,
     )
 
     assert result["X_emb"].shape == (4, 2)
+    assert cluster_kwargs == {"method": Clusterer, "expected": 4}
     plt.close(result["ax"].figure)
+
+
+def test_dimension_reduction_validates_cluster_label_count() -> None:
+    class InvalidClusterer:
+        def fit_predict(self, matrix):
+            return np.zeros(len(matrix) - 1)
+
+    data = np.arange(12, dtype=float).reshape(4, 3)
+
+    with pytest.raises(ValueError, match="one label per observation"):
+        dimension_reduction(
+            data,
+            method="pca",
+            color="cluster",
+            cluster_kwargs={"method": InvalidClusterer()},
+        )
 
 
 def test_plot_engine_creates_output_and_runs_pca(tmp_path) -> None:

@@ -92,6 +92,111 @@ def save_hook(stage, data):
         pickle.dump(save_dict, fp)
 
 
+def _prepare_spectrum_peaks(
+    spec,
+    mz_range: tuple[float, float] | None,
+    normalize: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    mz, intensity = spec.get_peaks()
+    mz = np.asarray(mz, dtype=float)
+    intensity = np.asarray(intensity, dtype=float)
+
+    finite = np.isfinite(mz) & np.isfinite(intensity)
+    mz = mz[finite]
+    intensity = intensity[finite]
+
+    order = np.argsort(mz)
+    mz = mz[order]
+    intensity = intensity[order]
+    if mz_range is not None:
+        if mz_range[0] >= mz_range[1]:
+            raise ValueError("mz_range must be increasing")
+        mask = (mz >= mz_range[0]) & (mz <= mz_range[1])
+        mz = mz[mask]
+        intensity = intensity[mask]
+    if mz.size == 0:
+        raise ValueError("Spectrum has no peaks in the requested range")
+
+    if normalize:
+        max_intensity = np.max(intensity)
+        if max_intensity > 0:
+            intensity = intensity / max_intensity
+    return mz, intensity
+
+
+def _spectrum_x_limits(
+    mz: np.ndarray,
+    mz_range: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if mz_range is not None:
+        return mz_range
+    x_min, x_max = float(np.min(mz)), float(np.max(mz))
+    padding = max(abs(x_min) * 1e-6, 1e-6) if x_min == x_max else 0.0
+    return x_min - padding, x_max + padding
+
+
+def _configure_spectrum_axes(
+    ax: plt.Axes,
+    mz: np.ndarray,
+    intensity: np.ndarray,
+    mz_range: tuple[float, float] | None,
+    intensity_range: tuple[float, float] | None,
+    normalize: bool,
+    title: str | None,
+) -> None:
+    ax.set_xlim(_spectrum_x_limits(mz, mz_range))
+    ax.set_xlabel("m/z")
+    ax.set_ylabel("Relative Intensity" if normalize else "Intensity")
+    ax.xaxis.set_minor_locator(AutoMinorLocator(10))
+    if title is not None:
+        ax.set_title(title)
+
+    if intensity_range is not None:
+        ax.set_ylim(*intensity_range)
+    else:
+        y_max = float(np.max(intensity))
+        ax.set_ylim(0, y_max * 1.05 if y_max > 0 else 1.0)
+
+
+def _select_peak_labels(
+    mz: np.ndarray,
+    intensity: np.ndarray,
+    top_n_labels: int,
+    exclusion_window: float,
+) -> list[int]:
+    selected = []
+    for index in np.argsort(intensity)[::-1]:
+        if any(abs(mz[index] - mz[other]) < exclusion_window for other in selected):
+            continue
+        selected.append(index)
+        if len(selected) >= top_n_labels:
+            break
+    return sorted(selected, key=lambda index: mz[index])
+
+
+def _annotate_spectrum_peaks(
+    ax: plt.Axes,
+    mz: np.ndarray,
+    intensity: np.ndarray,
+    selected: list[int],
+    label_fmt: str,
+) -> None:
+    y_max = np.max(intensity)
+    offset = 0.03 * y_max if y_max > 0 else 0.03
+    for index in selected:
+        x = mz[index]
+        y = intensity[index]
+        ax.annotate(
+            label_fmt.format(x),
+            xy=(x, y),
+            xytext=(x, y + offset),
+            textcoords="data",
+            ha="center",
+            fontsize=9,
+            arrowprops={"arrowstyle": "-", "lw": 0.8},
+        )
+
+
 def plot_spectrum(
     spec,
     top_n_labels: int = 0,
@@ -111,90 +216,19 @@ def plot_spectrum(
         raise ValueError("top_n_labels must be non-negative")
     if exclusion_window < 0:
         raise ValueError("exclusion_window must be non-negative")
-    mz, inten = spec.get_peaks()
-    mz = np.asarray(mz, dtype=float)
-    inten = np.asarray(inten, dtype=float)
-
-    finite = np.isfinite(mz) & np.isfinite(inten)
-    mz = mz[finite]
-    inten = inten[finite]
-
-    order = np.argsort(mz)
-    mz = mz[order]
-    inten = inten[order]
-    if mz_range is not None:
-        if mz_range[0] >= mz_range[1]:
-            raise ValueError("mz_range must be increasing")
-        mask = (mz >= mz_range[0]) & (mz <= mz_range[1])
-        mz = mz[mask]
-        inten = inten[mask]
-    if mz.size == 0:
-        raise ValueError("Spectrum has no peaks in the requested range")
-
-    if normalize:
-        max_i = np.max(inten)
-        if max_i > 0:
-            inten = inten / max_i
+    mz, intensity = _prepare_spectrum_peaks(spec, mz_range, normalize)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
 
-    ax.plot(mz, inten, linewidth=linewidth, color=kwargs.get("color", "black"))
-    if mz_range is not None:
-        x_limits = mz_range
-    else:
-        x_min, x_max = float(np.min(mz)), float(np.max(mz))
-        padding = max(abs(x_min) * 1e-6, 1e-6) if x_min == x_max else 0.0
-        x_limits = (x_min - padding, x_max + padding)
-    ax.set_xlim(x_limits)
-    ax.set_xlabel("m/z")
-    ax.set_ylabel("Relative Intensity" if normalize else "Intensity")
-    ax.xaxis.set_minor_locator(AutoMinorLocator(10))
+    ax.plot(mz, intensity, linewidth=linewidth, color=kwargs.get("color", "black"))
+    _configure_spectrum_axes(ax, mz, intensity, mz_range, intensity_range, normalize, title)
 
-    if title is not None:
-        ax.set_title(title)
-
-    if intensity_range is not None:
-        ax.set_ylim(*intensity_range)
-    else:
-        y_max = float(np.max(inten))
-        ax.set_ylim(0, y_max * 1.05 if y_max > 0 else 1.0)
-
-    if top_n_labels and top_n_labels > 0:
-        idx_sorted = np.argsort(inten)[::-1]
-        selected = []
-
-        for idx in idx_sorted:
-            x = mz[idx]
-
-            too_close = any(abs(x - mz[j]) < exclusion_window for j in selected)
-            if too_close:
-                continue
-
-            selected.append(idx)
-            if len(selected) >= top_n_labels:
-                break
-
-        selected = sorted(selected, key=lambda i: mz[i])
-
-        y_max = np.max(inten)
-        offset = 0.03 * y_max if y_max > 0 else 0.03
-
-        for idx in selected:
-            x = mz[idx]
-            y = inten[idx]
-
-            ax.annotate(
-                label_fmt.format(x),
-                xy=(x, y),
-                xytext=(x, y + offset),
-                textcoords="data",
-                ha="center",
-                fontsize=9,
-                arrowprops=dict(arrowstyle="-", lw=0.8),
-            )
+    if top_n_labels:
+        selected = _select_peak_labels(mz, intensity, top_n_labels, exclusion_window)
+        _annotate_spectrum_peaks(ax, mz, intensity, selected, label_fmt)
 
     ax.margins(x=0.01)
 

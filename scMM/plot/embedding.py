@@ -86,6 +86,124 @@ def _run_dim_reduction(X, method, dim):
     return DIM_REGISTRY[method](X, dim)
 
 
+def _as_feature_matrix(data: CyESIData | np.ndarray) -> np.ndarray:
+    values = data.data if isinstance(data, CyESIData) else data
+    matrix = np.asarray(values, dtype=float)
+    if matrix.ndim != 2 or 0 in matrix.shape:
+        raise ValueError("data must be a non-empty 2D matrix")
+    return matrix
+
+
+def _validate_embedding(embedding, n_observations: int) -> np.ndarray:
+    embedding = np.asarray(embedding)
+    if embedding.ndim != 2 or embedding.shape[0] != n_observations or embedding.shape[1] < 2:
+        raise ValueError("Dimension reduction must return at least two components per observation")
+    return embedding
+
+
+def _resolve_categorical_classes(
+    data: CyESIData | np.ndarray,
+    matrix: np.ndarray,
+    color: str,
+    categorical_mapping: dict | None,
+    cluster_kwargs: dict | None,
+) -> np.ndarray:
+    if color == "categorical":
+        if not isinstance(data, CyESIData):
+            raise TypeError("categorical coloring requires a CyESIData instance")
+        classes = data.get_labels(categorical_mapping)
+    elif color == "cluster":
+        options = dict(cluster_kwargs or {})
+        cluster_method = options.pop("method", DBSCAN)
+        model = cluster_method(**options) if isinstance(cluster_method, type) else cluster_method
+        classes = model.fit_predict(matrix)
+    else:
+        raise ValueError("color must be 'categorical', 'cluster', an array, or None")
+
+    classes = np.asarray(classes)
+    if classes.ndim != 1 or len(classes) != len(matrix):
+        raise ValueError("categorical colors must contain one label per observation")
+    return classes
+
+
+def _scatter_categories(
+    ax: plt.Axes,
+    embedding: np.ndarray,
+    classes: np.ndarray,
+    plot_kwargs: dict,
+) -> None:
+    cmap = plt.get_cmap(plot_kwargs.get("palette", "tab10"))
+    for index, label in enumerate(np.unique(classes)):
+        mask = classes == label
+        ax.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            s=plot_kwargs.get("s", 8),
+            alpha=plot_kwargs.get("alpha", 0.8),
+            label=str(label),
+            color=cmap(index % cmap.N),
+        )
+
+    if plot_kwargs.get("legend", True):
+        ax.legend(title=plot_kwargs.get("legend_title", "Class"), markerscale=2, frameon=False)
+
+
+def _scatter_continuous(
+    ax: plt.Axes,
+    embedding: np.ndarray,
+    color: np.ndarray,
+    plot_kwargs: dict,
+) -> None:
+    if color.ndim != 1 or len(color) != len(embedding):
+        raise ValueError("color array must have one value per observation")
+    points = ax.scatter(
+        embedding[:, 0],
+        embedding[:, 1],
+        c=color,
+        s=plot_kwargs.get("s", 8),
+        alpha=plot_kwargs.get("alpha", 0.8),
+        cmap=plot_kwargs.get("cmap", "viridis"),
+        vmin=plot_kwargs.get("vmin"),
+        vmax=plot_kwargs.get("vmax"),
+    )
+    if plot_kwargs.get("colorbar", True):
+        plt.colorbar(points, ax=ax)
+
+
+def _plot_embedding(
+    ax: plt.Axes,
+    data: CyESIData | np.ndarray,
+    matrix: np.ndarray,
+    embedding: np.ndarray,
+    color: np.ndarray | str | None,
+    categorical_mapping: dict | None,
+    cluster_kwargs: dict | None,
+    plot_kwargs: dict,
+) -> None:
+    if isinstance(color, str):
+        classes = _resolve_categorical_classes(
+            data, matrix, color, categorical_mapping, cluster_kwargs
+        )
+        _scatter_categories(ax, embedding, classes, plot_kwargs)
+    elif isinstance(color, np.ndarray):
+        _scatter_continuous(ax, embedding, color, plot_kwargs)
+    else:
+        ax.scatter(
+            embedding[:, 0],
+            embedding[:, 1],
+            s=plot_kwargs.get("s", 8),
+            alpha=plot_kwargs.get("alpha", 0.8),
+        )
+
+
+def _configure_embedding_axes(ax: plt.Axes, method: str, plot_kwargs: dict) -> None:
+    ax.set_xlabel(f"{method.upper()}-1")
+    ax.set_ylabel(f"{method.upper()}-2")
+    if "title" in plot_kwargs:
+        ax.set_title(plot_kwargs["title"])
+    ax.set_aspect("equal", adjustable="datalim")
+
+
 def dimension_reduction(
     data: CyESIData | np.ndarray,
     method: str = "pca",
@@ -121,79 +239,24 @@ def dimension_reduction(
     """
     reduce_kwargs = reduce_kwargs or {}
     plot_kwargs = plot_kwargs or {}
-    X = np.asarray(data.data if isinstance(data, CyESIData) else data, dtype=float)
-    if X.ndim != 2 or 0 in X.shape:
-        raise ValueError("data must be a non-empty 2D matrix")
+    X = _as_feature_matrix(data)
     method = method.lower()
-    emb = _run_dim_reduction(X, method, reduce_kwargs)
-    if emb.ndim != 2 or emb.shape[0] != X.shape[0] or emb.shape[1] < 2:
-        raise ValueError("Dimension reduction must return at least two components per observation")
+    emb = _validate_embedding(_run_dim_reduction(X, method, reduce_kwargs), len(X))
 
     if ax is None:
         _fig, ax = plt.subplots(figsize=plot_kwargs.get("figsize", (6, 6)))
 
-    x = emb[:, 0]
-    y = emb[:, 1]
-    s = plot_kwargs.get("s", 8)
-    alpha = plot_kwargs.get("alpha", 0.8)
-    if isinstance(color, str):
-        if color == "categorical":
-            if not isinstance(data, CyESIData):
-                raise TypeError("categorical coloring requires a CyESIData instance")
-            classes = data.get_labels(categorical_mapping)
-            classes = np.asarray(classes)
-        elif color == "cluster":
-            cluster_kwargs = cluster_kwargs or {}
-            cluster_method = cluster_kwargs.pop("method", DBSCAN)
-            model = (
-                cluster_method(**cluster_kwargs)
-                if isinstance(cluster_method, type)
-                else cluster_method
-            )
-            classes = model.fit_predict(X)
-            classes = np.asarray(classes)
-        else:
-            raise ValueError("color must be 'categorical', 'cluster', an array, or None")
-
-        uniq = np.unique(classes)
-        cmap = plt.get_cmap(plot_kwargs.get("palette", "tab10"))
-
-        for i, u in enumerate(uniq):
-            mask = classes == u
-            ax.scatter(x[mask], y[mask], s=s, alpha=alpha, label=str(u), color=cmap(i % cmap.N))
-
-        if plot_kwargs.get("legend", True):
-            ax.legend(title=plot_kwargs.get("legend_title", "Class"), markerscale=2, frameon=False)
-
-    elif isinstance(color, np.ndarray):
-        if color.ndim != 1 or len(color) != len(X):
-            raise ValueError("color array must have one value per observation")
-        cmap = plot_kwargs.get("cmap", "viridis")
-
-        sc = ax.scatter(
-            x,
-            y,
-            c=color,
-            s=s,
-            alpha=alpha,
-            cmap=cmap,
-            vmin=plot_kwargs.get("vmin"),
-            vmax=plot_kwargs.get("vmax"),
-        )
-
-        if plot_kwargs.get("colorbar", True):
-            plt.colorbar(sc, ax=ax)
-
-    else:
-        ax.scatter(x, y, s=s, alpha=alpha)
-
-    ax.set_xlabel(f"{method.upper()}-1")
-    ax.set_ylabel(f"{method.upper()}-2")
-
-    if "title" in plot_kwargs:
-        ax.set_title(plot_kwargs["title"])
-
-    ax.set_aspect("equal", adjustable="datalim")
+    _plot_embedding(
+        ax,
+        data,
+        X,
+        emb,
+        color,
+        categorical_mapping,
+        cluster_kwargs,
+        plot_kwargs,
+    )
+    _configure_embedding_axes(ax, method, plot_kwargs)
 
     return {
         "X_emb": emb,
