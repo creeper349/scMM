@@ -1,12 +1,16 @@
+from types import SimpleNamespace
+
 import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 
+import scMM.plot._trajectory as trajectory_module
 from scMM.plot._trajectory import (
     metabolic_velocity_field,
     metabolite_trends,
     resample_trajectory,
+    run_palantir,
     trend_cluster,
 )
 
@@ -83,3 +87,85 @@ def test_trajectory_rejects_nonfinite_parameterization() -> None:
 
     with pytest.raises(ValueError, match="finite"):
         resample_trajectory(adata, parameterization_key="time")
+
+
+def test_run_palantir_stores_aligned_outputs_and_provenance(monkeypatch) -> None:
+    adata = make_adata()
+
+    def fake_diffusion(data, **kwargs):
+        return {"EigenVectors": pd.DataFrame(np.ones((6, 3)), index=data.index)}
+
+    def fake_multiscale(diffusion, **kwargs):
+        return pd.DataFrame(
+            np.arange(12).reshape(6, 2), index=adata.obs_names, columns=["d1", "d2"]
+        )
+
+    def fake_palantir(multiscale, **kwargs):
+        assert kwargs["early_cell"] == "c1"
+        assert kwargs["terminal_states"] == ["c5", "c4"]
+        return SimpleNamespace(
+            pseudotime=pd.Series(np.linspace(0, 1, 6), index=adata.obs_names),
+            entropy=pd.Series(np.linspace(1, 0, 6), index=adata.obs_names),
+            branch_probs=pd.DataFrame(
+                np.column_stack([np.linspace(1, 0, 6), np.linspace(0, 1, 6)]),
+                index=adata.obs_names,
+                columns=["left", "right"],
+            ),
+            terminal_states=["c5", "c4"],
+            waypoints=["c0", "c3"],
+        )
+
+    monkeypatch.setattr(trajectory_module.palantir.utils, "run_diffusion_maps", fake_diffusion)
+    monkeypatch.setattr(
+        trajectory_module.palantir.utils,
+        "determine_multiscale_space",
+        fake_multiscale,
+    )
+    monkeypatch.setattr(trajectory_module.palantir.core, "run_palantir", fake_palantir)
+
+    result = run_palantir(
+        adata,
+        start_idx=1,
+        terminal_states=[5, "c4"],
+        n_diff_components=2,
+        store_prefix="pt",
+    )
+
+    assert result is adata
+    assert adata.uns["pt_branch_names"] == ["left", "right"]
+    assert adata.obsm["pt_ms_data"].shape == (6, 2)
+    assert adata.uns["pt_params"]["early_cell_internal"] == "c1"
+    assert adata.uns["pt_terminal_states_internal"] == ["c5", "c4"]
+    assert adata.uns["pt_waypoints_internal"] == ["c0", "c3"]
+    assert adata.uns["pt_cell_index_map"]["obs_pos"].tolist() == list(range(6))
+
+
+def test_metabolite_trends_uses_feature_names_and_sum_pooling() -> None:
+    adata = make_adata()
+    adata.var["display_name"] = ["rising", "falling", "constant"]
+
+    metabolite_trends(
+        adata,
+        window_size=2,
+        step_size=2,
+        kernel_stat="sum",
+        feature_name_key="display_name",
+    )
+
+    result = adata.uns["metabolite_trends"]
+    np.testing.assert_allclose(result["pooled"][0], adata.X[:2].sum(axis=0))
+    assert result["feature_names"].tolist() == ["rising", "falling", "constant"]
+    assert np.isfinite(result["qval"][:2]).all()
+
+
+def test_trend_cluster_rejects_ward_with_correlation_distance() -> None:
+    trends = np.array([[1.0, 3.0], [2.0, 2.0], [3.0, 1.0]])
+
+    with pytest.raises(ValueError, match="ward linkage"):
+        trend_cluster(
+            trends,
+            metric="correlation",
+            cluster_method="agglomerative",
+            n_clusters=2,
+            linkage="ward",
+        )

@@ -20,7 +20,8 @@ scMM/
 └── plot/
     ├── engine.py          # PlotEngine 共享状态与领域能力组合
     ├── _engine_*.py       # 降维、轨迹、聚类和特征网络领域能力
-    ├── _trajectory.py     # Palantir、轨迹、速度和趋势
+    ├── _trajectory.py     # Palantir、窗口轨迹、速度和趋势统计
+    ├── _trend_clustering.py # 趋势距离与聚类算法
     ├── embedding.py       # 轻量降维接口
     └── msplot.py          # EIC、谱和调试图
 ```
