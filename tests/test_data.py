@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from scMM.file._dataset_loading import combine_aligned_files, discover_ms_files
 from scMM.file.data import CyESIData
 
 
@@ -154,3 +156,86 @@ def test_deisotope_rejects_invalid_missing_mask_shape() -> None:
 
     with pytest.raises(ValueError, match="same shape"):
         dataset.deisotope(missing_func=lambda values: values[:, 0], inplace=False)
+
+
+def test_load_processed_uses_csv_fallback_and_builds_metadata(tmp_path: Path) -> None:
+    result_dir = tmp_path / "csv-only"
+    result_dir.mkdir()
+    (result_dir / ".meta").write_text(
+        json.dumps({"name": "csv-only", "ref_mz": 100.0}),
+        encoding="utf-8",
+    )
+    pd.DataFrame([[1.0, 2.0]], columns=[100.0, 200.0]).to_csv(result_dir / "data.csv")
+
+    dataset = CyESIData.load_from_processed(result_dir)
+
+    assert dataset.get_name() == "csv-only"
+    assert dataset.peak_meta.empty
+    assert dataset.feature_meta["mz"].tolist() == [100.0, 200.0]
+    assert dataset.feature_meta.index.tolist() == dataset.data.columns.tolist()
+    assert dataset.feature_meta.index.name == "feature_id"
+
+
+def test_load_processed_rejects_feature_metadata_dimension_mismatch(tmp_path: Path) -> None:
+    result_dir = tmp_path / "invalid"
+    result_dir.mkdir()
+    (result_dir / ".meta").write_text(
+        json.dumps({"name": "invalid", "ref_mz": 100.0}),
+        encoding="utf-8",
+    )
+    pd.DataFrame([[1.0, 2.0]], columns=[100.0, 200.0]).to_pickle(result_dir / "data.pkl")
+    pd.DataFrame({"mz": [100.0]}).to_pickle(result_dir / "feature_meta.pkl")
+
+    with pytest.raises(ValueError, match="feature_meta row count"):
+        CyESIData.load_from_processed(result_dir)
+
+
+def test_discover_ms_files_filters_and_sorts_direct_children(tmp_path: Path) -> None:
+    (tmp_path / "b.mzXML").touch()
+    (tmp_path / "a.mzML").touch()
+    (tmp_path / "notes.txt").touch()
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "ignored.mzML").touch()
+
+    files = discover_ms_files(tmp_path)
+
+    assert [Path(path).name for path in files] == ["a.mzML", "b.mzXML"]
+
+
+def test_combine_aligned_files_orders_acquisitions_and_normalizes_time() -> None:
+    def alignment(name: str, timestamp: float, retention_times: list[float], value: float):
+        index = pd.Index(range(len(retention_times)), name="frame")
+        return {
+            "file_meta": {"name": name, "timestamp": timestamp},
+            "data": pd.DataFrame(value, index=index, columns=[100.0]),
+            "peak_meta": pd.DataFrame({"rt": retention_times}, index=index),
+        }
+
+    state = combine_aligned_files(
+        "experiment",
+        100.0,
+        [
+            alignment("late.mzML", 20.0, [0.0, 2.0], 2.0),
+            alignment("early.mzML", 10.0, [0.0, 1.0], 1.0),
+        ],
+    )
+
+    assert state.data[100.0].tolist() == [1.0, 1.0, 2.0, 2.0]
+    assert state.peak_meta["label"].tolist() == ["early", "early", "late", "late"]
+    np.testing.assert_allclose(state.peak_meta["time"], [0.0, 1 / 12, 10 / 12, 1.0])
+    assert [item["name"] for item in state.file_meta["per_file_meta"]] == [
+        "early.mzML",
+        "late.mzML",
+    ]
+
+
+def test_alignwith_matches_each_right_feature_at_most_once() -> None:
+    left = make_dataset("left", [[1.0, 2.0]], [100.0, 100.0002])
+    right = make_dataset("right", [[10.0]], [100.0001])
+
+    left.alignwith(right, ppm_tol=5.0)
+
+    right_row = left.data.iloc[1].to_numpy()
+    assert np.count_nonzero(right_row) == 1
+    assert right_row.sum() == pytest.approx(10.0)

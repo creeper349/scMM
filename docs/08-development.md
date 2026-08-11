@@ -11,7 +11,10 @@ scMM/
 │   ├── io.py              # mzML/mzXML 文件边界与稳定导出
 │   ├── _spectrum.py       # Orbitrap 网格、谱汇总与峰细化
 │   ├── _alignment.py      # 峰到目标 m/z 的匹配与帧聚合
-│   ├── data.py            # CyESIData 高层数据容器与处理方法
+│   ├── data.py            # CyESIData 稳定门面与构造入口
+│   ├── _dataset_loading.py # 已处理/原始数据装载与组合
+│   ├── _dataset_processing.py # 预处理、变换与数据集合并
+│   ├── _dataset_interop.py # 保存、访问、注释与 AnnData 转换
 │   ├── _deisotope.py      # 去同位素的纯计算、分配与元数据构建
 │   └── batch.py           # 独立批处理与结果合并
 ├── util/
@@ -115,6 +118,8 @@ PY
 - `CyESIData` 只负责容器状态和处理溯源；较长的数值流程应拆到相邻的私有模块，并优先实现为
   不修改输入的纯函数。`_deisotope.py` 是这一边界的参考：公开方法组装参数并提交结果，候选检测、
   回归、筛选、分配和元数据生成各自独立。
+- 数据容器的新能力应归入装载、处理或互操作领域之一；`data.py` 只组合这些能力并维护稳定的
+  构造入口。跨数据集合并应先生成完整 `DatasetState`，确认成功后再一次性更新当前对象。
 
 ## 添加归一化方法
 
