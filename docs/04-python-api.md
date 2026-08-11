@@ -97,6 +97,8 @@ hits.to_csv("results/annotation_candidates.csv", index=False)
 
 `get_annotation()` 只返回候选表，不自动修改 `feature_meta`。参数化 Notebook 会额外把每个 m/z
 误差最小的候选映射到特征元数据。
+批量 `search()` 即使没有命中也会返回带稳定候选列的空 DataFrame，便于直接拼接或写出；候选
+生成、ppm 排序和每个查询的数量限制对自定义单/多电荷加合物采用相同流程。
 
 若只需查询少量质量，可直接使用：
 

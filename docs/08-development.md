@@ -20,7 +20,9 @@ scMM/
 ├── util/
 │   ├── peak.py            # 局部谱统计与细胞事件窗口归约
 │   ├── normalize.py       # 归一化注册表和内置方法
-│   ├── annotation.py      # SDF 读取、加合物和 m/z 搜索
+│   ├── annotation.py      # SDF 读取与稳定搜索门面
+│   ├── _adducts.py        # 加合物定义与质量换算
+│   ├── _annotation_search.py # 候选生成、排序与结果模式
 │   └── denoise.py         # 矩阵分解与峰重建工具
 └── plot/
     ├── engine.py          # PlotEngine 共享状态与领域能力组合
