@@ -18,7 +18,8 @@ scMM/
 │   ├── annotation.py      # SDF 读取、加合物和 m/z 搜索
 │   └── denoise.py         # 矩阵分解与峰重建工具
 └── plot/
-    ├── engine.py          # AnnData 高层分析与绘图
+    ├── engine.py          # PlotEngine 共享状态与领域能力组合
+    ├── _engine_*.py       # 降维、轨迹、聚类和特征网络领域能力
     ├── _trajectory.py     # Palantir、轨迹、速度和趋势
     ├── embedding.py       # 轻量降维接口
     └── msplot.py          # EIC、谱和调试图
