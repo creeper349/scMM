@@ -13,19 +13,30 @@ from scMM.file.io import (
 )
 
 
+def make_spectrum(
+    mz: list[float],
+    intensity: list[float],
+    *,
+    retention_time: float = 0.0,
+    ms_level: int = 1,
+) -> oms.MSSpectrum:
+    spectrum = oms.MSSpectrum()
+    spectrum.setMSLevel(ms_level)
+    spectrum.setRT(retention_time)
+    spectrum.set_peaks((np.asarray(mz), np.asarray(intensity, dtype=np.float32)))
+    return spectrum
+
+
 def make_experiment() -> oms.MSExperiment:
     experiment = oms.MSExperiment()
     for retention_time, scale in [(0.0, 1.0), (1.0, 2.0)]:
-        spectrum = oms.MSSpectrum()
-        spectrum.setMSLevel(1)
-        spectrum.setRT(retention_time)
-        spectrum.set_peaks(
-            (
-                np.array([99.9, 100.0, 100.1]),
-                np.array([0.0, 10.0 * scale, 0.0], dtype=np.float32),
+        experiment.addSpectrum(
+            make_spectrum(
+                [99.9, 100.0, 100.1],
+                [0.0, 10.0 * scale, 0.0],
+                retention_time=retention_time,
             )
         )
-        experiment.addSpectrum(spectrum)
     return experiment
 
 
@@ -88,3 +99,78 @@ def test_mzml_save_load_round_trip_uses_timestamp_fallback(tmp_path) -> None:
     assert experiment.getNrSpectra() == 2
     assert metadata["name"] == "synthetic"
     assert metadata["timestamp"] == pytest.approx(output.stat().st_mtime, abs=1.0)
+
+
+def test_extract_peaks_supports_centroid_intensity_modes() -> None:
+    spectrum = make_spectrum([99.9, 100.0, 100.1], [1.0, 10.0, 2.0])
+
+    apex_mz, apex_intensity = extract_peaks(
+        spectrum,
+        distance=1,
+        centroid_intensity_mode="apex",
+    )
+    sum_mz, sum_intensity = extract_peaks(
+        spectrum,
+        distance=1,
+        centroid_intensity_mode="sum",
+    )
+
+    np.testing.assert_allclose(apex_mz, sum_mz)
+    assert apex_mz[0] > 100.0
+    assert apex_intensity[0] == pytest.approx(10.0)
+    assert sum_intensity[0] == pytest.approx(13.0)
+
+
+def test_extract_peaks_refines_parabolic_vertex() -> None:
+    spectrum = make_spectrum([99.9, 100.0, 100.1], [1.0, 4.0, 3.0])
+
+    peak_mz, peak_intensity = extract_peaks(spectrum, method="parabola", distance=1)
+
+    assert peak_mz[0] == pytest.approx(100.025)
+    assert peak_intensity[0] == pytest.approx(4.125)
+
+
+def test_align_frame_aggregates_multiple_peaks_per_target() -> None:
+    experiment = oms.MSExperiment()
+    experiment.addSpectrum(
+        make_spectrum(
+            [99.9996, 99.9998, 100.0, 100.0002, 100.0004],
+            [0.0, 2.0, 0.0, 3.0, 0.0],
+        )
+    )
+
+    summed, _ = align_frame(
+        experiment,
+        [100.0],
+        ppm=5,
+        aggregate="sum",
+        method="parabola",
+        distance=1,
+        resolution_200=1e9,
+    )
+    maximum, _ = align_frame(
+        experiment,
+        [100.0],
+        ppm=5,
+        aggregate="max",
+        method="parabola",
+        distance=1,
+        resolution_200=1e9,
+    )
+
+    assert summed.iloc[0, 0] == pytest.approx(5.0)
+    assert maximum.iloc[0, 0] == pytest.approx(3.0)
+
+
+def test_align_frame_restores_requested_target_order() -> None:
+    frame, _ = align_frame(
+        make_experiment(),
+        [200.0, 100.0],
+        ppm=20,
+        resolution_200=1_000,
+        distance=1,
+    )
+
+    assert frame.columns.tolist() == [200.0, 100.0]
+    np.testing.assert_allclose(frame[200.0], 0.0)
+    np.testing.assert_allclose(frame[100.0], [10.0, 20.0])

@@ -8,7 +8,9 @@
 scMM/
 ├── cli.py                 # scmm-process 命令行入口
 ├── file/
-│   ├── io.py              # mzML/mzXML、谱网格、峰提取和帧对齐
+│   ├── io.py              # mzML/mzXML 文件边界与稳定导出
+│   ├── _spectrum.py       # Orbitrap 网格、谱汇总与峰细化
+│   ├── _alignment.py      # 峰到目标 m/z 的匹配与帧聚合
 │   ├── data.py            # CyESIData 高层数据容器与处理方法
 │   ├── _deisotope.py      # 去同位素的纯计算、分配与元数据构建
 │   └── batch.py           # 独立批处理与结果合并
