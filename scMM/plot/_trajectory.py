@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import anndata as ad
 import numpy as np
-import palantir
 import pandas as pd
 from scipy.stats import spearmanr
 
@@ -148,6 +147,13 @@ def _run_palantir_analysis(
     terminal_states,
     config: _PalantirConfig,
 ):
+    try:
+        import palantir
+    except ImportError as exc:
+        raise ImportError(
+            "Palantir pseudotime analysis requires the optional palantir package."
+        ) from exc
+
     diffusion = palantir.utils.run_diffusion_maps(
         data,
         n_components=config.n_diff_components,
@@ -225,7 +231,7 @@ def resample_trajectory(
     step_size: int = 50,
     cell_dist_key: str = "X_umap",
     parameterization_key: str = "palantir_pseudotime",
-    branch_prob_key: str = "palantir_branch_probs",
+    branch_prob_key: str | None = "palantir_branch_probs",
     store_key: str = "trajectory",
     min_cells_per_window: int = 5,
     **kwargs,
@@ -265,7 +271,7 @@ def _prepare_trajectory_inputs(
     adata: ad.AnnData,
     cell_dist_key: str,
     parameterization_key: str,
-    branch_prob_key: str,
+    branch_prob_key: str | None,
     min_cells_per_window: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if adata.n_obs < 1:
@@ -286,7 +292,7 @@ def _prepare_trajectory_inputs(
     return points, time, _prepare_branch_probabilities(adata, branch_prob_key)
 
 
-def _prepare_branch_probabilities(adata: ad.AnnData, key: str) -> np.ndarray:
+def _prepare_branch_probabilities(adata: ad.AnnData, key: str | None) -> np.ndarray:
     probabilities = adata.obsm.get(key)
     if probabilities is None:
         return np.ones((adata.n_obs, 1), dtype=float)

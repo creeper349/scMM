@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -12,6 +13,22 @@ import scMM.plot._engine_trajectory as trajectory_engine
 from scMM.plot.embedding import dimension_reduction
 from scMM.plot.engine import PlotEngine
 from scMM.plot.msplot import plot_ms, plot_spectrum
+
+
+def test_plot_engine_import_defers_single_feature_dependencies() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import scMM.plot.engine; "
+            "assert 'palantir' not in sys.modules; assert 'seaborn' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_plot_ms_supports_default_frame_range() -> None:

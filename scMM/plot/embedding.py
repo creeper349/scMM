@@ -214,28 +214,16 @@ def dimension_reduction(
     cluster_kwargs: dict | None = None,
     plot_kwargs: dict | None = None,
 ):
-    """
-    A function interface for unsupervised dimension reduction and visualization.
+    """Reduce a feature matrix and draw its first two embedding components.
 
-    :param data: Processed CyESI single cell metabolism data
-    :type data: CyESIData
-    :param method: Dimension reduction method, could be "pca", "umap", "tsne", "isomap", "lle".
-    if other methods are used, use @register_dim(method:str) to register first.
-    :type method: str
-    :param ax: Matplotlib figure axis for drawing. if None, a new one will be generated.
-    :type ax: plt.Axes
-    :param reduce_kwargs: Parameters for dimension reduction.
-    :type reduce_kwargs: dict
-    :param color: Method of coloring points. Using np.ndarray for continous values, "categorical" for
-    coloring with file names, "cluster" for unsupervised clustering and None for single color.
-    :type color: np.ndarray | str | None
-    :param categorical_mapping: Mapping to transfer file names to class labels,
-    e.g. {"file_1":positive, "file_2":negative}
-    :type categorical_mapping: Optional[dict]
-    :param cluster_kwargs: Parameters for unsupervised clustering. Use only when color = "cluster".
-    :type cluster_kwargs: dict
-    :param plot_kwargs: Parameters for plotting.
-    :type plot_kwargs: dict
+    ``data`` may be a :class:`CyESIData` instance or a non-empty 2D NumPy-compatible
+    matrix. Built-in methods are ``pca``, ``umap``, ``tsne``, ``isomap``, and ``lle``;
+    additional methods can be added with :func:`register_dim`.
+
+    ``color`` accepts a one-dimensional NumPy array for continuous values,
+    ``"categorical"`` for dataset labels, ``"cluster"`` for DBSCAN or a compatible
+    custom clusterer, and ``None`` for a single color. The returned dictionary contains
+    the embedding, normalized method name, parameter mappings, and Matplotlib axis.
     """
     reduce_kwargs = reduce_kwargs or {}
     plot_kwargs = plot_kwargs or {}

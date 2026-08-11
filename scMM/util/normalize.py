@@ -146,7 +146,7 @@ def normalize(X, method="total", norm_kwargs=None, return_params=False):
     ----------
     X : array-like (n_samples, n_features)
     method : str
-        total | quantile | pqn | zscore | log | minmax
+        total | max | quantile | pqn | zscore | log | minmax
     norm_kwargs : dict
         Parameters for normalization function.
     return_params : bool

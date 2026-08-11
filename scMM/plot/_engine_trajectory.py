@@ -47,7 +47,7 @@ class TrajectoryMixin:
         step_size: int = 50,
         cell_dist_key: str = "X_umap",
         parameterization_key: str = "palantir_pseudotime",
-        branch_prob_key: str = "palantir_branch_probs",
+        branch_prob_key: str | None = "palantir_branch_probs",
         store_key: str = "trajectory",
         min_cells_per_window: int = 5,
         plotting: bool = False,

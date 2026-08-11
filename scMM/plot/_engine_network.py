@@ -1,4 +1,4 @@
-"""Feature-network computation and rendering for :class:`PlotEngine`."""
+"""Feature-distance embedding and rendering for :class:`PlotEngine`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sklearn.metrics import pairwise_distances
 
 
 class FeatureNetworkMixin:
-    """Provide feature-network embedding for a PlotEngine-like object."""
+    """Provide feature-distance embedding for a PlotEngine-like object."""
 
     def feature_network(
         self,
@@ -18,12 +18,14 @@ class FeatureNetworkMixin:
         metric: str = "pearson",
         **kwargs,
     ):
-        """Embed pairwise feature distances and save a labeled network plot."""
+        """Embed pairwise feature distances and save a labeled scatter plot."""
         if metric not in {"pearson", "euclidean"}:
             raise ValueError("metric must be 'pearson' or 'euclidean'")
         values, names, feature_mask = _select_named_features(self.adata, self._get_X(), name_key)
         if values.shape[1] < 3:
-            raise ValueError("At least three named features are required for a feature network")
+            raise ValueError(
+                "At least three named features are required for a feature-distance embedding"
+            )
         distances = _feature_distances(values, metric)
         embedding = _embed_feature_distances(distances, kwargs)
         colors, cmap = _feature_colors(self.adata, names, feature_mask, class_key, kwargs)

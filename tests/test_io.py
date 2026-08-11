@@ -90,15 +90,25 @@ def test_sum_extract_and_align_synthetic_spectra() -> None:
     np.testing.assert_allclose(metadata["rt"], [0.0, 1.0])
 
 
-def test_mzml_save_load_round_trip_uses_timestamp_fallback(tmp_path) -> None:
+def test_mzml_save_load_round_trip_infers_format_and_uses_timestamp_fallback(tmp_path) -> None:
     output = tmp_path / "synthetic.mzML"
 
     save_spectra(list(make_experiment()), output)
-    experiment, metadata = load_single_file(output, format="auto")
+    experiment, metadata = load_single_file(output)
 
     assert experiment.getNrSpectra() == 2
     assert metadata["name"] == "synthetic"
     assert metadata["timestamp"] == pytest.approx(output.stat().st_mtime, abs=1.0)
+
+
+def test_load_single_file_infers_mzxml_by_default(tmp_path) -> None:
+    output = tmp_path / "synthetic.mzXML"
+    oms.MzXMLFile().store(str(output), make_experiment())
+
+    experiment, metadata = load_single_file(output)
+
+    assert experiment.getNrSpectra() == 2
+    assert metadata["name"] == "synthetic"
 
 
 def test_extract_peaks_supports_centroid_intensity_modes() -> None:

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def load_single_file(
     path: str | Path,
-    format: Literal["auto", "mzML", "mzXML"] = "mzML",
+    format: Literal["auto", "mzML", "mzXML"] = "auto",
 ) -> tuple[oms.MSExperiment, dict[str, Any]]:
     """Load an mzML/mzXML experiment and its acquisition metadata."""
     path = Path(path).expanduser()

@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 def r1_decomposition(X: np.ndarray, tol: float = 1e-6, max_iter: int = 100, dtype=np.float64):
     """
-    Generate two vectors to approximate the input matrix X by their dot product.
+    Generate two vectors whose outer product approximates the input matrix X.
     i.e. Find a, b to minimize ||X - a b^T||_F
 
     :param X: input matrix
@@ -97,7 +97,7 @@ def peak_recon(
     dtype=np.float64,
 ):
     """
-    Function to reconstruct CyESI signal by separating gaussian baseline and sparse peaks.
+    Reconstruct sparse positive peaks above a precomputed baseline.
 
     :param S: Signal matrix
     :type S: np.ndarray
@@ -105,7 +105,7 @@ def peak_recon(
     :type B: np.ndarray
     :param lam: Hyperparameter for L1 regularization to control cell signal sparsity
     :type lam: float
-    :param sigma_min: Minimum variance for baseline noise
+    :param sigma_min: Minimum standard deviation for baseline noise
     :type sigma_min: float
     :param tau: Hyperparameter of soft thresholding to control peak sparsity
     :type tau: float

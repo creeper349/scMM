@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import anndata as ad
@@ -5,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import scMM.plot._trajectory as trajectory_module
 from scMM.plot._trajectory import (
     metabolic_velocity_field,
     metabolite_trends,
@@ -115,13 +115,14 @@ def test_run_palantir_stores_aligned_outputs_and_provenance(monkeypatch) -> None
             waypoints=["c0", "c3"],
         )
 
-    monkeypatch.setattr(trajectory_module.palantir.utils, "run_diffusion_maps", fake_diffusion)
-    monkeypatch.setattr(
-        trajectory_module.palantir.utils,
-        "determine_multiscale_space",
-        fake_multiscale,
+    fake_package = SimpleNamespace(
+        utils=SimpleNamespace(
+            run_diffusion_maps=fake_diffusion,
+            determine_multiscale_space=fake_multiscale,
+        ),
+        core=SimpleNamespace(run_palantir=fake_palantir),
     )
-    monkeypatch.setattr(trajectory_module.palantir.core, "run_palantir", fake_palantir)
+    monkeypatch.setitem(sys.modules, "palantir", fake_package)
 
     result = run_palantir(
         adata,

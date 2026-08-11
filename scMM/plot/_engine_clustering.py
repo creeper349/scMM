@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
 from matplotlib import pyplot as plt
 from sklearn.neighbors import kneighbors_graph
 
@@ -155,6 +154,11 @@ def _save_cluster_plot(
     marker_size: float,
     cmap: str,
 ) -> None:
+    try:
+        import seaborn as sns
+    except ImportError as exc:
+        raise ImportError("Cluster plotting requires the optional seaborn package.") from exc
+
     fig, ax = plt.subplots(figsize=figsize)
     unique_labels = np.unique(labels)
     palette = sns.color_palette(cmap, n_colors=len(unique_labels))

@@ -228,13 +228,13 @@ CLI 的目录模式等价于 `load_from_filelist()`，不是 `batch_process()`�
 
 高级工作流不能满足时，可以组合 `scMM.file.io`：
 
-- `load_single_file()`：读取 mzML/mzXML 和文件元数据。
+- `load_single_file()`：按扩展名自动读取 mzML/mzXML 和文件元数据；也可用 `format` 显式指定。
 - `sum_spec()`：在变分辨率 Orbitrap 网格上汇总谱。
 - `sum_spectrum_from_file()`：读取并汇总单文件。
 - `extract_peaks()`：从汇总谱提取质心峰。
 - `align_frame()`：把每个扫描对齐到指定 m/z 列表。
 - `pack_specs()`：把多个 `MSSpectrum` 包装为实验对象。
-- `save_spectra()`：保存 mzML/mzXML。
+- `save_spectra()`：把一个或多个谱保存为 mzML。
 
 底层 API 不自动完成细胞识别和元数据封装。一般分析优先使用 `CyESIData`。
 
