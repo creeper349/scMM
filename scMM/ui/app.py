@@ -29,6 +29,7 @@ _STYLESHEET = """
   border-radius: 12px;
   box-shadow: 0 3px 14px rgba(15, 118, 110, 0.06);
   padding: 12px 16px;
+  overflow-wrap: anywhere;
 }
 .scmm-hint { color: #64748b; font-size: 0.92rem; }
 """
@@ -44,11 +45,55 @@ class PreviewWorkspace:
         self.tic = pd.DataFrame()
         self.eic = pd.DataFrame()
         self.spectrum = pd.DataFrame()
-        self._selector: pn.widgets.FileSelector | None = None
+        self._browser_directory = Path(".")
+        self._directory_values: set[str] = set()
+        self._selected_path: str | None = None
 
         labels = [root.label for root in self.catalog.roots]
-        self.root_select = pn.widgets.Select(label="数据存储", options=labels, value=labels[0])
-        self.selector_area = pn.Column(sizing_mode="stretch_width")
+        self.root_select = pn.widgets.Select(
+            label="数据存储",
+            options=labels,
+            value=labels[0],
+            width=None,
+            min_width=120,
+            max_width=180,
+            sizing_mode="stretch_width",
+        )
+        self.directory_text = pn.pane.Markdown("目录：`/`", width=180, sizing_mode=None)
+        self.file_select = pn.widgets.Select(
+            label="文件夹 / 原始数据",
+            options={"正在读取…": None},
+            value=None,
+            width=180,
+            sizing_mode=None,
+        )
+        self.up_button = pn.widgets.Button(
+            label="上一级",
+            icon="arrow-back-up",
+            width=84,
+            height=34,
+            sizing_mode="fixed",
+        )
+        self.reload_button = pn.widgets.Button(
+            label="刷新",
+            icon="refresh",
+            width=84,
+            height=34,
+            sizing_mode="fixed",
+        )
+        browser_actions = pn.Row(
+            self.up_button,
+            self.reload_button,
+            width=180,
+            sizing_mode=None,
+        )
+        self.selector_area = pn.Column(
+            self.directory_text,
+            self.file_select,
+            browser_actions,
+            width=180,
+            sizing_mode=None,
+        )
         self.selection_text = pn.pane.Markdown(
             "<span class='scmm-hint'>请选择一个 mzML 或 mzXML 文件。</span>"
         )
@@ -60,11 +105,33 @@ class PreviewWorkspace:
         )
 
         self.summary = pn.pane.Markdown("尚未加载数据。", css_classes=["scmm-card"])
-        self.ms_level = pn.widgets.Select(label="MS level", options=[1], value=1, disabled=True)
-        self.target_mz = pn.widgets.FloatInput(
-            label="EIC 目标 m/z", value=100.0, step=0.0001, disabled=True
+        self.ms_level = pn.widgets.Select(
+            label="MS",
+            options=[1],
+            value=1,
+            disabled=True,
+            width=96,
+            height=54,
+            sizing_mode="fixed",
         )
-        self.ppm = pn.widgets.FloatInput(label="ppm 容差", value=5.0, step=0.5, disabled=True)
+        self.target_mz = pn.widgets.FloatInput(
+            label="目标 m/z",
+            value=100.0,
+            step=0.0001,
+            disabled=True,
+            width=96,
+            height=54,
+            sizing_mode="fixed",
+        )
+        self.ppm = pn.widgets.FloatInput(
+            label="ppm",
+            value=5.0,
+            step=0.5,
+            disabled=True,
+            width=96,
+            height=54,
+            sizing_mode="fixed",
+        )
         self.rt_range = pn.widgets.RangeSlider(
             label="保留时间范围（秒）",
             start=0.0,
@@ -72,9 +139,25 @@ class PreviewWorkspace:
             value=(0.0, 1.0),
             step=0.1,
             disabled=True,
+            width=180,
+            sizing_mode=None,
         )
-        self.mz_min = pn.widgets.FloatInput(label="谱图 m/z 下限", value=100.0, disabled=True)
-        self.mz_max = pn.widgets.FloatInput(label="谱图 m/z 上限", value=1000.0, disabled=True)
+        self.mz_min = pn.widgets.FloatInput(
+            label="m/z 下限",
+            value=100.0,
+            disabled=True,
+            width=96,
+            height=54,
+            sizing_mode="fixed",
+        )
+        self.mz_max = pn.widgets.FloatInput(
+            label="m/z 上限",
+            value=1000.0,
+            disabled=True,
+            width=96,
+            height=54,
+            sizing_mode="fixed",
+        )
         self.average_spectrum = pn.widgets.Checkbox(label="显示平均谱", value=False, disabled=True)
         self.refresh_button = pn.widgets.Button(
             label="应用范围并刷新",
@@ -84,13 +167,22 @@ class PreviewWorkspace:
         )
 
         self.tic_pane = pn.pane.Plotly(
-            _empty_figure("总离子流图（TIC）"), config=_PLOT_CONFIG, height=320
+            _empty_figure("总离子流图（TIC）"),
+            config=_PLOT_CONFIG,
+            height=280,
+            styles={"flex": "1 1 420px", "min-width": "0"},
         )
         self.eic_pane = pn.pane.Plotly(
-            _empty_figure("提取离子流图（EIC）"), config=_PLOT_CONFIG, height=320
+            _empty_figure("提取离子流图（EIC）"),
+            config=_PLOT_CONFIG,
+            height=280,
+            styles={"flex": "1 1 420px", "min-width": "0"},
         )
         self.spectrum_pane = pn.pane.Plotly(
-            _empty_figure("合并谱"), config=_PLOT_CONFIG, height=390
+            _empty_figure("合并谱"),
+            config=_PLOT_CONFIG,
+            height=340,
+            styles={"min-width": "0"},
         )
 
         self.tic_download = pn.widgets.FileDownload(
@@ -98,24 +190,33 @@ class PreviewWorkspace:
             icon="download",
             callback=lambda: _csv_buffer(self.tic),
             disabled=True,
+            width=128,
+            sizing_mode="fixed",
         )
         self.eic_download = pn.widgets.FileDownload(
             label="下载 EIC CSV",
             icon="download",
             callback=lambda: _csv_buffer(self.eic),
             disabled=True,
+            width=128,
+            sizing_mode="fixed",
         )
         self.spectrum_download = pn.widgets.FileDownload(
             label="下载谱图 CSV",
             icon="download",
             callback=lambda: _csv_buffer(self.spectrum),
             disabled=True,
+            width=128,
+            sizing_mode="fixed",
         )
 
         self.tabs = pn.Tabs(dynamic=True, sizing_mode="stretch_both")
         self._build_tabs()
-        self._replace_selector()
+        self._refresh_browser()
         self.root_select.param.watch(self._on_root_change, "value")
+        self.file_select.param.watch(self._on_browser_selection, "value")
+        self.up_button.on_click(self._go_to_parent)
+        self.reload_button.on_click(self._reload_browser)
         self.load_button.on_click(self._load_selected)
         self.refresh_button.on_click(self._refresh_all)
         self.spectrum_pane.param.watch(self._use_clicked_mz, "click_data")
@@ -132,19 +233,29 @@ class PreviewWorkspace:
             self.summary,
             sizing_mode="stretch_width",
         )
-        preview_page = pn.Column(
-            pn.Row(
-                pn.pane.Markdown(
-                    "## ② 初步查看\n缩放、框选或悬停检查信号；点击合并谱上的点可填入 EIC 目标。",
-                    sizing_mode="stretch_width",
-                ),
-                self.tic_download,
-                self.eic_download,
-                self.spectrum_download,
-                align="end",
+        preview_header = pn.FlexBox(
+            pn.pane.Markdown(
+                "## ② 初步查看\n缩放、框选或悬停检查信号；点击合并谱上的点可填入 EIC 目标。",
+                sizing_mode="stretch_width",
+                styles={"flex": "1 1 420px"},
             ),
+            self.tic_download,
+            self.eic_download,
+            self.spectrum_download,
+            align_items="flex-end",
+            gap="8px",
+            sizing_mode="stretch_width",
+        )
+        chromatograms = pn.FlexBox(
+            self.tic_pane,
+            self.eic_pane,
+            gap="12px",
+            sizing_mode="stretch_width",
+        )
+        preview_page = pn.Column(
+            preview_header,
             self.summary,
-            pn.Row(self.tic_pane, self.eic_pane, sizing_mode="stretch_width"),
+            chromatograms,
             self.spectrum_pane,
             sizing_mode="stretch_both",
         )
@@ -167,6 +278,22 @@ class PreviewWorkspace:
 
     def sidebar(self) -> pn.Column:
         """Build the guided control column."""
+        preview_inputs = pn.FlexBox(
+            self.ms_level,
+            self.mz_min,
+            self.mz_max,
+            self.average_spectrum,
+            gap="8px",
+            align_items="flex-end",
+            sizing_mode="stretch_width",
+        )
+        eic_inputs = pn.FlexBox(
+            self.target_mz,
+            self.ppm,
+            gap="8px",
+            align_items="flex-end",
+            sizing_mode="stretch_width",
+        )
         return pn.Column(
             "### 1. 选择数据",
             self.root_select,
@@ -174,54 +301,81 @@ class PreviewWorkspace:
             self.load_button,
             pn.layout.Divider(),
             "### 2. 查看范围",
-            self.ms_level,
             self.rt_range,
-            self.mz_min,
-            self.mz_max,
-            self.average_spectrum,
+            preview_inputs,
             pn.layout.Divider(),
             "### 3. 提取离子流",
-            self.target_mz,
-            self.ppm,
+            eic_inputs,
             self.refresh_button,
             sizing_mode="stretch_width",
         )
 
-    def _replace_selector(self) -> None:
-        root = self.catalog.root(self.root_select.value)
-        selector = pn.widgets.FileSelector(
-            directory=str(root.path),
-            root_directory=str(root.path),
-            file_pattern="*.mz*",
-            only_files=True,
-            show_hidden=False,
-            size=10,
-            sizing_mode="stretch_width",
+    def _refresh_browser(self) -> None:
+        entries = tuple(
+            entry
+            for entry in self.catalog.list_entries(self.root_select.value, self._browser_directory)
+            if not entry.name.startswith(".")
         )
-        selector.param.watch(self._on_file_selection, "value")
-        self._selector = selector
-        self.selector_area[:] = [selector]
-        self._on_file_selection(None)
+        self._directory_values = {
+            entry.relative_path.as_posix() for entry in entries if entry.is_directory
+        }
+        options: dict[str, str | None] = {"请选择…": None}
+        for entry in entries:
+            prefix = "📁 " if entry.is_directory else "📄 "
+            options[f"{prefix}{entry.name}"] = entry.relative_path.as_posix()
+        if len(options) == 1:
+            options = {"当前目录没有可浏览的数据": None}
+
+        relative = self._browser_directory.as_posix()
+        self.directory_text.object = f"目录：`/{'' if relative == '.' else relative}`"
+        self.up_button.disabled = self._browser_directory == Path(".")
+        self.file_select.param.update(options=options, value=None)
 
     def _on_root_change(self, _event) -> None:
-        self._replace_selector()
+        self._browser_directory = Path(".")
+        self._selected_path = None
+        self._refresh_browser()
+        self._update_file_selection()
 
-    def _on_file_selection(self, _event) -> None:
-        selected = self._selector.value if self._selector is not None else []
-        self.load_button.disabled = len(selected) != 1
-        if len(selected) == 1:
-            self.selection_text.object = f"已选择：`{Path(selected[0]).name}`"
-        elif len(selected) > 1:
-            self.selection_text.object = "一次只能预览一个文件，请只保留一个选择。"
+    def _on_browser_selection(self, event) -> None:
+        selected = event.new
+        if selected is None:
+            return
+        if selected in self._directory_values:
+            self._browser_directory = Path(selected)
+            self._selected_path = None
+            self._refresh_browser()
         else:
+            self._selected_path = selected
+        self._update_file_selection()
+
+    def _go_to_parent(self, _event) -> None:
+        if self._browser_directory == Path("."):
+            return
+        parent = self._browser_directory.parent
+        self._browser_directory = Path(".") if parent == Path(".") else parent
+        self._selected_path = None
+        self._refresh_browser()
+        self._update_file_selection()
+
+    def _reload_browser(self, _event) -> None:
+        self._selected_path = None
+        self._refresh_browser()
+        self._update_file_selection()
+
+    def _update_file_selection(self) -> None:
+        self.load_button.disabled = self._selected_path is None
+        if self._selected_path is None:
             self.selection_text.object = "请选择一个 mzML 或 mzXML 文件。"
+        else:
+            self.selection_text.object = f"已选择：`{self._selected_path}`"
 
     def _load_selected(self, _event) -> None:
-        if self._selector is None or len(self._selector.value) != 1:
+        if self._selected_path is None:
             return
         self.load_button.loading = True
         try:
-            preview = self.service.open(self.root_select.value, self._selector.value[0])
+            preview = self.service.open(self.root_select.value, self._selected_path)
             self.preview = preview
             self._configure_controls(preview)
             self._calculate_all()
