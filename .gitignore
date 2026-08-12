@@ -216,6 +216,7 @@ __marimo__/
 
 .tmp/
 data/
+results/
 files/
 *.png
 *.jpg

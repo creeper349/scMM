@@ -126,7 +126,11 @@ class ProcessingTaskManager:
         if not path.is_file():
             raise KeyError(f"Unknown task: {task_id}")
         task = ProcessingTask.from_json(path)
-        if task.status not in _TERMINAL_STATUSES and task.pid and not _pid_is_running(task.pid):
+        if (
+            task.status not in _TERMINAL_STATUSES
+            and task.pid
+            and not _worker_is_running(task.pid, task.state_path)
+        ):
             task = replace(
                 task,
                 status="failed",
@@ -233,7 +237,16 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _pid_is_running(pid: int) -> bool:
+def _worker_is_running(pid: int, state_path: str) -> bool:
+    command_path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        command = command_path.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        command = ""
+    if command:
+        return "scMM.application.worker" in command and state_path in command
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

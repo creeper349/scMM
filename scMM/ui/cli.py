@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from scMM.application import StorageRoot
+from scMM.application import OutputRoot, StorageRoot
 
 
 def parse_storage_root(value: str) -> tuple[str, Path]:
@@ -14,6 +14,16 @@ def parse_storage_root(value: str) -> tuple[str, Path]:
     label, separator, path_text = value.partition("=")
     if not separator or not label.strip() or not path_text.strip():
         raise argparse.ArgumentTypeError("storage must use LABEL=PATH, for example Raw=/mnt/ms")
+    return label.strip(), Path(path_text.strip()).expanduser()
+
+
+def parse_output_root(value: str) -> tuple[str, Path]:
+    """Parse a LABEL=PATH result-root specification."""
+    label, separator, path_text = value.partition("=")
+    if not separator or not label.strip() or not path_text.strip():
+        raise argparse.ArgumentTypeError(
+            "output must use LABEL=PATH, for example Results=/mnt/scmm-results"
+        )
     return label.strip(), Path(path_text.strip()).expanduser()
 
 
@@ -35,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="Listening address; use 0.0.0.0 for LAN/Tailscale access",
     )
+    parser.add_argument(
+        "--output",
+        action="append",
+        type=parse_output_root,
+        metavar="LABEL=PATH",
+        help="Writable server directory for processed results; repeat for multiple roots",
+    )
     parser.add_argument("--port", type=int, default=5006, help="Listening port (default: 5006)")
     parser.add_argument(
         "--allow-websocket-origin",
@@ -51,6 +68,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root_specs = args.storage or [("当前目录", Path.cwd())]
     roots = tuple(StorageRoot(label, path) for label, path in root_specs)
+    output_specs = args.output
+    if output_specs is None:
+        default_output = Path.cwd() / "results"
+        default_output.mkdir(parents=True, exist_ok=True)
+        output_specs = [("处理结果", default_output)]
+    outputs = tuple(OutputRoot(label, path) for label, path in output_specs)
 
     try:
         import panel as pn
@@ -69,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     if args.allow_websocket_origin:
         serve_options["websocket_origin"] = args.allow_websocket_origin
-    pn.serve(lambda: create_app(roots), **serve_options)
+    pn.serve(lambda: create_app(roots, outputs), **serve_options)
     return 0
 
 

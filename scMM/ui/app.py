@@ -10,7 +10,15 @@ import pandas as pd
 import panel as pn
 import plotly.graph_objects as go
 
-from scMM.application import RawFilePreview, RawPreviewService, StorageCatalog, StorageRoot
+from scMM.application import (
+    OutputRoot,
+    RawFilePreview,
+    RawPreviewService,
+    StorageCatalog,
+    StorageRoot,
+)
+
+from .processing import GuidedProcessingPanel
 
 pn.extension("plotly", notifications=True, sizing_mode="stretch_width")
 
@@ -38,7 +46,11 @@ _STYLESHEET = """
 class PreviewWorkspace:
     """State and callbacks for one browser session."""
 
-    def __init__(self, roots: tuple[StorageRoot, ...]) -> None:
+    def __init__(
+        self,
+        roots: tuple[StorageRoot, ...],
+        output_roots: tuple[OutputRoot, ...],
+    ) -> None:
         self.catalog = StorageCatalog(roots)
         self.service = RawPreviewService(self.catalog)
         self.preview: RawFilePreview | None = None
@@ -209,6 +221,7 @@ class PreviewWorkspace:
             width=128,
             sizing_mode="fixed",
         )
+        self.processing = GuidedProcessingPanel(self.catalog, output_roots)
 
         self.tabs = pn.Tabs(dynamic=True, sizing_mode="stretch_both")
         self._build_tabs()
@@ -259,15 +272,7 @@ class PreviewWorkspace:
             self.spectrum_pane,
             sizing_mode="stretch_both",
         )
-        processing_page = pn.Column(
-            pn.pane.Markdown(
-                """## ③ 处理与结果
-
-该阶段将复用当前预览选择，按“参数预检 → 后台处理 → 质量检查 → 结果转存”引导操作。
-首个可运行版本先固定原始数据选择、TIC/EIC/合并谱预览和 CSV 下载边界。""",
-                css_classes=["scmm-card"],
-            )
-        )
+        processing_page = self.processing.panel()
         self.tabs.extend(
             [
                 ("① 数据选择", selection_page),
@@ -367,8 +372,10 @@ class PreviewWorkspace:
         self.load_button.disabled = self._selected_path is None
         if self._selected_path is None:
             self.selection_text.object = "请选择一个 mzML 或 mzXML 文件。"
+            self.processing.set_input(None, None)
         else:
             self.selection_text.object = f"已选择：`{self._selected_path}`"
+            self.processing.set_input(self.root_select.value, self._selected_path)
 
     def _load_selected(self, _event) -> None:
         if self._selected_path is None:
@@ -499,9 +506,12 @@ class PreviewWorkspace:
         )
 
 
-def create_app(roots: tuple[StorageRoot, ...]):
+def create_app(
+    roots: tuple[StorageRoot, ...],
+    output_roots: tuple[OutputRoot, ...],
+):
     """Create an isolated guided UI session for configured storage roots."""
-    workspace = PreviewWorkspace(tuple(roots))
+    workspace = PreviewWorkspace(tuple(roots), tuple(output_roots))
     template = pn.template.FastListTemplate(
         title="scMM 数据查看",
         accent_base_color=_ACCENT,
@@ -512,6 +522,7 @@ def create_app(roots: tuple[StorageRoot, ...]):
         theme_toggle=True,
         raw_css=[_STYLESHEET],
     )
+    pn.state.onload(workspace.processing.start_polling)
     return template
 
 

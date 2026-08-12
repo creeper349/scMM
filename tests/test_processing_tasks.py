@@ -63,7 +63,7 @@ def test_task_manager_blocks_a_second_active_task(tmp_path: Path) -> None:
     manager, request, _ = _manager(tmp_path)
     with (
         patch("scMM.application.tasks.subprocess.Popen", return_value=Mock(pid=4321)),
-        patch("scMM.application.tasks._pid_is_running", return_value=True),
+        patch("scMM.application.tasks._worker_is_running", return_value=True),
     ):
         manager.submit(request)
         with pytest.raises(TaskBusyError, match="still running"):
@@ -76,7 +76,7 @@ def test_task_manager_reads_bounded_log_and_reconciles_dead_worker(tmp_path: Pat
         task = manager.submit(request)
     Path(task.log_path).write_text("0123456789", encoding="utf-8")
 
-    with patch("scMM.application.tasks._pid_is_running", return_value=False):
+    with patch("scMM.application.tasks._worker_is_running", return_value=False):
         reconciled = manager.get(task.task_id)
 
     assert reconciled.status == "failed"

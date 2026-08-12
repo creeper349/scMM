@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("panel")
 pytest.importorskip("plotly")
 
-from scMM.application import StorageRoot
+from scMM.application import OutputRoot, StorageRoot
 from scMM.ui.app import PreviewWorkspace, create_app
 
 
@@ -25,10 +25,19 @@ def _write_raw_file(path) -> None:
     oms.MzMLFile().store(str(path), experiment)
 
 
+def _workspace(tmp_path) -> PreviewWorkspace:
+    output = tmp_path / "results"
+    output.mkdir(exist_ok=True)
+    return PreviewWorkspace(
+        (StorageRoot("Raw", tmp_path),),
+        (OutputRoot("Results", output),),
+    )
+
+
 def test_ui_workspace_loads_selected_file_and_populates_downloads(tmp_path) -> None:
     raw_path = tmp_path / "preview.mzML"
     _write_raw_file(raw_path)
-    workspace = PreviewWorkspace((StorageRoot("Raw", tmp_path),))
+    workspace = _workspace(tmp_path)
     workspace.file_select.value = raw_path.name
 
     workspace._load_selected(None)
@@ -42,14 +51,19 @@ def test_ui_workspace_loads_selected_file_and_populates_downloads(tmp_path) -> N
 
 
 def test_create_app_returns_template_with_isolated_session(tmp_path) -> None:
-    app = create_app((StorageRoot("Raw", tmp_path),))
+    output = tmp_path / "results"
+    output.mkdir()
+    app = create_app(
+        (StorageRoot("Raw", tmp_path),),
+        (OutputRoot("Results", output),),
+    )
 
     assert type(app).__name__ == "FastListTemplate"
     assert app.title == "scMM 数据查看"
 
 
 def test_sidebar_uses_compact_responsive_controls(tmp_path) -> None:
-    workspace = PreviewWorkspace((StorageRoot("Raw", tmp_path),))
+    workspace = _workspace(tmp_path)
     sidebar = workspace.sidebar()
 
     compact = (
@@ -77,7 +91,7 @@ def test_compact_browser_navigates_directories(tmp_path) -> None:
     nested.mkdir()
     raw_path = nested / "nested.mzML"
     _write_raw_file(raw_path)
-    workspace = PreviewWorkspace((StorageRoot("Raw", tmp_path),))
+    workspace = _workspace(tmp_path)
 
     workspace.file_select.value = "batch"
 
