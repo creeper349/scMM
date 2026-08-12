@@ -91,6 +91,18 @@ results/
 
 读取时优先选择 pickle；CSV 主要用于交换。CSV 往返可能把数值列名或可空数据类型转换成字符串。
 
+通过网页后台处理时，同一结果目录还会增加：
+
+| 文件 | 用途 |
+|---|---|
+| `scmm-manifest.json` | 输入路径、完整处理参数、软件版本、质量提示和产物列表 |
+| `quality-summary.json` | 细胞数、特征数、零值比例和中位质量指标 |
+| `cell-quality.csv` | 每个细胞事件的总强度、检出特征数及可用采集元数据 |
+| `feature-quality.csv` | 每个 m/z 的检出率、均值和非零中位强度 |
+| `embedding.csv` | 固定种子的 PCA，以及依赖与数据规模允许时的 UMAP 坐标 |
+
+这些文件不改变 `CyESIData.load_from_processed()` 所需的标准文件，可按需要与标准结果一起归档。
+
 ## Notebook 输出
 
 默认目录关系：

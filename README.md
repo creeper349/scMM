@@ -65,14 +65,19 @@ result_dir = data.save("results")
 reloaded = CyESIData.load_from_processed(result_dir)
 ```
 
-在本机启动引导式网页，用服务器已经挂载的目录直接选择并预览原始数据：
+在本机启动引导式网页，用服务器已经挂载的目录直接选择、预览并处理原始数据：
 
 ```bash
-scmm-ui --storage "原始数据=/mnt/ms-data" --address 0.0.0.0 --port 5006
+scmm-ui \
+  --storage "原始数据=/mnt/ms-data" \
+  --output "处理结果=/mnt/scmm-results" \
+  --address 0.0.0.0 \
+  --port 5006
 ```
 
-页面支持 TIC、EIC、合并/平均谱、点击谱图设置 EIC 目标以及 CSV 下载。局域网或 Tailscale
-访问方式和目录边界配置见[实验室网页 UI 与部署](docs/09-web-ui.md)。
+页面支持 TIC/EIC/合并谱预览、处理参数预检、断开浏览器后继续运行的后台任务、PCA/UMAP
+质量检查以及标准结果和质量表下载。局域网或 Tailscale 访问方式和目录边界配置见
+[实验室网页 UI 与部署](docs/09-web-ui.md)。
 
 ## 支持范围
 
@@ -80,7 +85,7 @@ scmm-ui --storage "原始数据=/mnt/ms-data" --address 0.0.0.0 --port 5006
 - 原始谱：mzML、mzXML。
 - 核心依赖：PyOpenMS、NumPy、pandas、SciPy、scikit-learn、AnnData。
 - 可选分析：Matplotlib、Seaborn、UMAP、Palantir、Leiden/Louvain。
-- 网页 UI：Panel、Plotly；`environment.yml` 已包含，pip 安装时使用 `scMM[ui]`。
+- 网页 UI：Panel、Plotly、UMAP；`environment.yml` 已包含，pip 安装时使用 `scMM[ui]`。
 
 项目当前版本为 `0.2.0`，开发状态为 Alpha。正式分析前应使用标准样品和实验质控数据验证
 参考离子、ppm 容差、SNR 阈值及归一化方案。

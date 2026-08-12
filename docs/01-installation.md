@@ -48,7 +48,7 @@ jupyter lab
 | 核心依赖 | 原始谱读取、矩阵处理、保存、归一化、基础统计 |
 | `plot` | Matplotlib/Seaborn、UMAP、Palantir 和轨迹图 |
 | `cluster` | Leiden 与 Louvain 聚类 |
-| `ui` | Panel 引导式网页和 Plotly 原始谱交互图 |
+| `ui` | Panel 引导式网页、Plotly 原始谱/质量图和 UMAP 质量检查 |
 | `dev` | pytest、Ruff、构建与覆盖率 |
 
 `environment.yml` 已包含项目开发和完整分析所需的科学计算依赖。仅通过 pip 安装时可使用：

@@ -44,6 +44,7 @@ cluster = [
 ui = [
     "panel>=1.8,<2",
     "plotly>=6,<7",
+    "umap-learn>=0.5",
 ]
 dev = [
     "build>=1.2",

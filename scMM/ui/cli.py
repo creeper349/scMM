@@ -31,14 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the web-server argument parser."""
     parser = argparse.ArgumentParser(
         prog="scmm-ui",
-        description="Launch the guided scMM raw-data preview web interface.",
+        description="Launch the guided scMM preview, processing, and quality web interface.",
     )
     parser.add_argument(
         "--storage",
         action="append",
         type=parse_storage_root,
         metavar="LABEL=PATH",
-        help="Server-mounted directory exposed to the file selector; repeat for multiple roots",
+        help="Server-mounted directory exposed to guided browsing; repeat for multiple roots",
     )
     parser.add_argument(
         "--address",

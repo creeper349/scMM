@@ -27,7 +27,7 @@
 8. [开发与质量检查](08-development.md)
    - 测试、格式检查、构建、代码结构和贡献前检查。
 9. [实验室网页 UI 与部署](09-web-ui.md)
-   - 挂载目录选择、TIC/EIC/合并谱预览、CSV 下载、Tailscale 访问和后续架构。
+   - 挂载目录选择、TIC/EIC/合并谱预览、后台处理、质量检查、结果下载和 Tailscale 访问。
 
 ## 快速选择入口
 
@@ -39,7 +39,7 @@
 | 理解生成的 CSV/pickle | [数据与输出](06-data-and-output.md) |
 | 调整 UMAP、轨迹或趋势 | [下游分析](05-analysis.md) |
 | 处理结果异常或报错 | [排错指南](07-troubleshooting.md) |
-| 从浏览器初步查看服务器原始谱 | [网页 UI](09-web-ui.md) |
+| 从浏览器查看并处理服务器原始谱 | [网页 UI](09-web-ui.md) |
 
 ## 核心数据流
 

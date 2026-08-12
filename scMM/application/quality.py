@@ -185,7 +185,7 @@ def _umap_embedding(values: np.ndarray) -> np.ndarray:
             )
             from umap import UMAP
     except ImportError as exc:
-        raise ImportError("install scMM[plot] to enable UMAP") from exc
+        raise ImportError("install scMM[ui] or scMM[plot] to enable UMAP") from exc
     neighbors = max(2, min(15, len(values) - 1))
     return UMAP(
         n_components=2,

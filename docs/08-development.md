@@ -9,10 +9,15 @@ scMM/
 ├── cli.py                 # scmm-process 命令行入口
 ├── application/
 │   ├── storage.py         # 挂载目录白名单、路径解析和越界防护
-│   └── raw_preview.py     # TIC、EIC、合并谱和原始文件摘要
+│   ├── raw_preview.py     # TIC、EIC、合并谱和原始文件摘要
+│   ├── processing.py      # 处理参数、输入/输出边界和预检计划
+│   ├── tasks.py           # 单任务锁、原子状态、日志和进程管理
+│   ├── worker.py          # 独立处理进程、运行清单和质量产物编排
+│   └── quality.py         # 质量统计、PCA/UMAP 及持久化文件
 ├── ui/
 │   ├── cli.py             # scmm-ui 服务启动入口
-│   └── app.py             # Panel 引导式会话和 Plotly 交互图
+│   ├── app.py             # 原始谱选择、预览和 Plotly 交互图
+│   └── processing.py      # 参数预检、任务恢复、质量图和结果下载
 ├── file/
 │   ├── io.py              # mzML/mzXML 文件边界与稳定导出
 │   ├── _spectrum.py       # Orbitrap 网格、谱汇总与峰细化
@@ -39,8 +44,8 @@ scMM/
     └── msplot.py          # EIC、谱和调试图
 ```
 
-测试位于 `tests/`，覆盖数据保存/加载、对齐、去同位素、归一化、谱 I/O、路径边界、原始谱
-预览、绘图、轨迹和 CLI。
+测试位于 `tests/`，覆盖数据保存/加载、对齐、去同位素、归一化、谱 I/O、输入/输出路径边界、
+原始谱预览、后台任务、质量产物、网页控件、绘图、轨迹和 CLI。
 
 ## 开发环境
 
@@ -136,6 +141,8 @@ PY
   函数。不得通过 `pop()` 等操作修改调用方传入的参数字典。
 - 网页控件不得直接读取任意客户端路径。所有选择必须经过 `StorageCatalog` 的配置根目录和真实路径
   双重校验；TIC/EIC 等领域计算保留在 `application/`，Panel 回调只管理会话状态和展示。
+- 处理结果必须经过 `OutputCatalog` 限制为配置根目录的直接子目录，拒绝隐藏名称和符号链接；重任务
+  必须在独立 worker 中执行，并用原子状态文件恢复，不能依赖浏览器会话存活。
 
 ## 添加归一化方法
 

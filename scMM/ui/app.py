@@ -1,4 +1,4 @@
-"""Guided Panel application for selecting and previewing raw MS files."""
+"""Guided Panel application for previewing and processing raw MS files."""
 
 from __future__ import annotations
 
