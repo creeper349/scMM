@@ -6,6 +6,7 @@ from html import escape
 from pathlib import Path
 
 import panel as pn
+import plotly.graph_objects as go
 
 from scMM.application import (
     OutputCatalog,
@@ -15,7 +16,10 @@ from scMM.application import (
     ProcessingRequest,
     ProcessingTaskManager,
     StorageCatalog,
+    load_quality_report,
 )
+
+_PLOT_CONFIG = {"displaylogo": False, "responsive": True, "scrollZoom": True}
 
 _PRESETS = {
     "均衡（推荐起点）": "balanced",
@@ -132,6 +136,86 @@ class GuidedProcessingPanel:
             height=220,
             sizing_mode="stretch_width",
         )
+        self.quality_summary = pn.pane.Markdown(
+            "任务完成后显示质量检查。", css_classes=["scmm-card"]
+        )
+        self.intensity_plot = pn.pane.Plotly(
+            _empty_figure("每细胞总强度"),
+            config=_PLOT_CONFIG,
+            height=280,
+            styles={"flex": "1 1 420px", "min-width": "0"},
+        )
+        self.detection_plot = pn.pane.Plotly(
+            _empty_figure("特征检出率"),
+            config=_PLOT_CONFIG,
+            height=280,
+            styles={"flex": "1 1 420px", "min-width": "0"},
+        )
+        self.pca_plot = pn.pane.Plotly(
+            _empty_figure("PCA"),
+            config=_PLOT_CONFIG,
+            height=320,
+            styles={"flex": "1 1 420px", "min-width": "0"},
+        )
+        self.umap_plot = pn.pane.Plotly(
+            _empty_figure("UMAP"),
+            config=_PLOT_CONFIG,
+            height=320,
+            styles={"flex": "1 1 420px", "min-width": "0"},
+        )
+        self.cell_table = pn.pane.DataFrame(height=260, sizing_mode="stretch_width", index=False)
+        self.feature_table = pn.pane.DataFrame(height=260, sizing_mode="stretch_width", index=False)
+        artifact_names = (
+            ("处理矩阵 CSV", "data.csv"),
+            ("细胞元数据 CSV", "peak_meta.csv"),
+            ("特征元数据 CSV", "feature_meta.csv"),
+            ("细胞质量 CSV", "cell-quality.csv"),
+            ("特征质量 CSV", "feature-quality.csv"),
+            ("PCA/UMAP CSV", "embedding.csv"),
+            ("运行清单 JSON", "scmm-manifest.json"),
+        )
+        self.artifact_downloads = {
+            filename: pn.widgets.FileDownload(
+                label=label,
+                icon="download",
+                file=None,
+                disabled=True,
+                width=145,
+                height=36,
+                sizing_mode="fixed",
+            )
+            for label, filename in artifact_names
+        }
+        self.quality_section = pn.Column(
+            "### 4. 质量检查与结果下载",
+            self.quality_summary,
+            pn.FlexBox(
+                self.intensity_plot,
+                self.detection_plot,
+                gap="12px",
+                sizing_mode="stretch_width",
+            ),
+            pn.FlexBox(
+                self.pca_plot,
+                self.umap_plot,
+                gap="12px",
+                sizing_mode="stretch_width",
+            ),
+            pn.Tabs(
+                ("细胞质量（前 200 行）", self.cell_table),
+                ("特征质量（前 200 行）", self.feature_table),
+                dynamic=False,
+                sizing_mode="stretch_width",
+            ),
+            pn.FlexBox(
+                *self.artifact_downloads.values(),
+                gap="8px",
+                sizing_mode="stretch_width",
+            ),
+            visible=False,
+            sizing_mode="stretch_width",
+        )
+        self._quality_task_id: str | None = None
 
         self._wire_callbacks()
         self._reload_tasks()
@@ -190,6 +274,7 @@ class GuidedProcessingPanel:
             task_header,
             self.status_text,
             self.log_text,
+            self.quality_section,
             sizing_mode="stretch_both",
         )
 
@@ -231,6 +316,10 @@ class GuidedProcessingPanel:
             details.append(f"**错误：** {escape(task.error)}")
         self.status_text.object = "  \n".join(details)
         self.log_text.value = self.tasks.read_log(task.task_id)
+        if task.status == "succeeded" and self._quality_task_id != task.task_id:
+            self._load_quality(task)
+        elif task.status != "succeeded" and self._quality_task_id != task.task_id:
+            self.quality_section.visible = False
 
     def _wire_callbacks(self) -> None:
         self.preset.param.watch(self._apply_preset, "value")
@@ -367,6 +456,51 @@ class GuidedProcessingPanel:
         self._active_task_id = event.new
         self.poll()
 
+    def _load_quality(self, task) -> None:
+        try:
+            result_path = self._safe_result_path(task.result_path)
+            report = load_quality_report(result_path)
+        except Exception as exc:
+            self.quality_section.visible = True
+            self.quality_summary.object = f"质量检查文件暂不可用：{escape(str(exc))}"
+            return
+        summary = report.summary
+        warning_text = ""
+        if summary.embedding_warnings:
+            warning_text = "  \n**嵌入提示：** " + "；".join(
+                escape(item) for item in summary.embedding_warnings
+            )
+        self.quality_summary.object = (
+            f"**细胞事件：** {summary.cell_count:,}　"
+            f"**特征：** {summary.feature_count:,}　"
+            f"**整体零值：** {summary.zero_fraction:.1%}　"
+            f"**中位总强度：** {summary.median_total_intensity:.4g}　"
+            f"**中位检出特征：** {summary.median_detected_features:.0f}{warning_text}"
+        )
+        self.intensity_plot.object = _histogram_figure(
+            report.cells.get("total_intensity", []), "每细胞总强度", "总强度"
+        )
+        self.detection_plot.object = _detection_figure(report.features)
+        self.pca_plot.object = _embedding_figure(report, "PCA1", "PCA2", "PCA")
+        self.umap_plot.object = _embedding_figure(report, "UMAP1", "UMAP2", "UMAP")
+        self.cell_table.object = report.cells.head(200)
+        self.feature_table.object = report.features.head(200)
+        for filename, download in self.artifact_downloads.items():
+            path = result_path / filename
+            download.file = str(path) if path.is_file() else None
+            download.filename = f"{result_path.name}_{filename}"
+            download.disabled = not path.is_file()
+        self._quality_task_id = task.task_id
+        self.quality_section.visible = True
+
+    def _safe_result_path(self, value: str) -> Path:
+        result = Path(value).resolve(strict=True)
+        if not result.is_dir() or not (result / ".meta").is_file():
+            raise FileNotFoundError(f"不是完整的 scMM 结果目录：{result}")
+        if not any(result.parent == root.path for root in self.outputs.roots):
+            raise PermissionError("任务结果不在已配置的输出根目录内")
+        return result
+
 
 def _float_input(label: str, value: float, *, step: float):
     return pn.widgets.FloatInput(
@@ -385,6 +519,69 @@ def _human_size(value: int) -> str:
             return f"{amount:.1f} {unit}"
         amount /= 1024
     return f"{amount:.1f} TiB"
+
+
+def _empty_figure(title: str) -> go.Figure:
+    figure = go.Figure()
+    figure.update_layout(title=title)
+    return _style_figure(figure)
+
+
+def _histogram_figure(values, title: str, x_title: str) -> go.Figure:
+    figure = go.Figure(go.Histogram(x=values, marker_color="#0F766E"))
+    figure.update_layout(title=title, xaxis_title=x_title, yaxis_title="细胞数")
+    return _style_figure(figure)
+
+
+def _detection_figure(features) -> go.Figure:
+    figure = go.Figure(
+        go.Scattergl(
+            x=features.get("mz", []),
+            y=features.get("detection_rate", []),
+            mode="markers",
+            marker={"color": "#C2410C", "size": 6, "opacity": 0.7},
+        )
+    )
+    figure.update_layout(title="特征检出率", xaxis_title="m/z", yaxis_title="检出率")
+    figure.update_yaxes(range=[0, 1.02])
+    return _style_figure(figure)
+
+
+def _embedding_figure(report, x_name: str, y_name: str, title: str) -> go.Figure:
+    if x_name not in report.embedding or y_name not in report.embedding:
+        return _empty_figure(f"{title}（当前数据不可用）")
+    totals = report.cells.set_index("cell_index")["total_intensity"]
+    colors = report.embedding["cell_index"].map(totals)
+    figure = go.Figure(
+        go.Scattergl(
+            x=report.embedding[x_name],
+            y=report.embedding[y_name],
+            mode="markers",
+            marker={
+                "color": colors,
+                "colorscale": "Viridis",
+                "showscale": True,
+                "colorbar": {"title": "总强度"},
+                "size": 6,
+                "opacity": 0.75,
+            },
+            text=report.embedding["cell_index"],
+            hovertemplate="cell=%{text}<br>x=%{x:.4g}<br>y=%{y:.4g}<extra></extra>",
+        )
+    )
+    figure.update_layout(title=title, xaxis_title=x_name, yaxis_title=y_name)
+    return _style_figure(figure)
+
+
+def _style_figure(figure: go.Figure) -> go.Figure:
+    figure.update_layout(
+        template="plotly_white",
+        margin={"l": 55, "r": 25, "t": 55, "b": 48},
+        hovermode="closest",
+    )
+    figure.update_xaxes(showgrid=True, gridcolor="rgba(148,163,184,0.18)")
+    figure.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.18)")
+    return figure
 
 
 __all__ = ["GuidedProcessingPanel"]

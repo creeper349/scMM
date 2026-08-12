@@ -92,6 +92,7 @@ def test_worker_saves_result_and_reproducibility_manifest(tmp_path: Path) -> Non
     class FakeDataset:
         def __init__(self):
             self.data = pd.DataFrame([[1.0]], columns=[100.0])
+            self.peak_meta = pd.DataFrame(index=[0])
             self.file_meta = {"name": "sample", "ref_mz": 100.0}
 
         def get_name(self):
@@ -112,6 +113,7 @@ def test_worker_saves_result_and_reproducibility_manifest(tmp_path: Path) -> Non
     manifest = json.loads((result / "scmm-manifest.json").read_text())
     assert manifest["task_id"] == task.task_id
     assert manifest["parameters"]["ref_mz"] == 100
+    assert (result / "quality-summary.json").is_file()
     assert ProcessingTask.from_json(task.state_path).status == "succeeded"
 
 

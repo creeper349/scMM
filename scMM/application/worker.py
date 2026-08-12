@@ -14,6 +14,7 @@ from pathlib import Path
 from scMM.file.data import CyESIData
 
 from .processing import ProcessingParameters
+from .quality import build_quality_report, save_quality_report
 from .tasks import load_request, update_task, utc_now
 
 
@@ -28,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_request(request_path: str | Path, state_path: str | Path) -> Path:
     """Run processing and save a reproducibility manifest."""
+    cache_root = Path(state_path).resolve().parent.parent / ".numba-cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("NUMBA_CACHE_DIR", str(cache_root))
     payload = load_request(request_path)
     state = update_task(
         state_path,
@@ -41,6 +45,10 @@ def run_request(request_path: str | Path, state_path: str | Path) -> Path:
     expected_result = Path(payload["result_path"])
     if expected_result.parent.resolve(strict=True) != output_root:
         raise PermissionError("Worker result path is outside its validated output root")
+    if expected_result.is_symlink():
+        raise PermissionError("Worker result path cannot be a symbolic link")
+    if expected_result.exists() and expected_result.resolve(strict=True).parent != output_root:
+        raise PermissionError("Worker result path resolves outside its validated output root")
 
     parameters = ProcessingParameters(**payload["parameters"])
     logging.getLogger(__name__).info("Processing %s as task %s", source, state.task_id)
@@ -55,7 +63,15 @@ def run_request(request_path: str | Path, state_path: str | Path) -> Path:
     result_path = dataset.save(output_root, overwrite=bool(payload["overwrite"]))
     if result_path.resolve() != expected_result.resolve():
         raise RuntimeError(f"Unexpected result path: {result_path}")
-    _write_manifest(result_path, payload)
+    quality_warnings: list[str] = []
+    try:
+        quality = build_quality_report(dataset)
+        save_quality_report(quality, result_path)
+        quality_warnings.extend(quality.summary.embedding_warnings)
+    except Exception as exc:  # Quality artifacts must not invalidate processed scientific output.
+        logging.getLogger(__name__).exception("Quality artifact generation failed")
+        quality_warnings.append(f"Quality artifact generation failed: {type(exc).__name__}: {exc}")
+    _write_manifest(result_path, payload, quality_warnings)
     update_task(
         state_path,
         status="succeeded",
@@ -65,11 +81,13 @@ def run_request(request_path: str | Path, state_path: str | Path) -> Path:
     return result_path
 
 
-def _write_manifest(result_path: Path, request: dict) -> None:
-    try:
-        scmm_version = version("scMM")
-    except PackageNotFoundError:
-        scmm_version = "source-tree"
+def _write_manifest(result_path: Path, request: dict, quality_warnings: list[str]) -> None:
+    software = {"python": platform.python_version(), "platform": platform.platform()}
+    for distribution in ("scMM", "numpy", "pandas", "pyopenms", "scikit-learn", "umap-learn"):
+        try:
+            software[distribution] = version(distribution)
+        except PackageNotFoundError:
+            software[distribution] = "not-installed" if distribution != "scMM" else "source-tree"
     manifest = {
         "schema_version": 1,
         "task_id": request["task_id"],
@@ -78,11 +96,11 @@ def _write_manifest(result_path: Path, request: dict) -> None:
         "result_path": str(result_path.resolve()),
         "parameters": request["parameters"],
         "warnings": request.get("warnings", []),
-        "software": {
-            "scMM": scmm_version,
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-        },
+        "quality_warnings": quality_warnings,
+        "artifacts": sorted(
+            {path.name for path in result_path.iterdir() if path.is_file()} | {"scmm-manifest.json"}
+        ),
+        "software": software,
     }
     with (result_path / "scmm-manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)

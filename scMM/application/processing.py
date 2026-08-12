@@ -122,12 +122,16 @@ class OutputCatalog:
     def resolve_target(self, label: str, name: str) -> Path:
         """Resolve one direct result directory below an output root."""
         safe_name = Path(name).name
-        if safe_name != name or safe_name in {"", ".", ".."}:
+        if safe_name != name or safe_name in {"", ".", ".."} or safe_name.startswith("."):
             raise ValueError(f"Invalid result name: {name!r}")
         root = self.root(label)
         target = root.path / safe_name
         parent = target.parent.resolve(strict=True)
         if parent != root.path:
+            raise PermissionError(f"Output path is outside root {label!r}: {target}")
+        if target.is_symlink():
+            raise PermissionError(f"Result path cannot be a symbolic link: {target}")
+        if target.exists() and target.resolve(strict=True).parent != root.path:
             raise PermissionError(f"Output path is outside root {label!r}: {target}")
         return target
 
@@ -176,7 +180,7 @@ class ProcessingPlanner:
         input_size = source.stat().st_size
         warnings: list[str] = []
         if request.overwrite and target.exists():
-            warnings.append("Existing result directory will be replaced")
+            warnings.append("Existing standard result files will be overwritten")
         if free_bytes < max(input_size * 3, 1_000_000_000):
             warnings.append("Output storage has less than the recommended free space")
         if request.parameters.n_jobs == -1:

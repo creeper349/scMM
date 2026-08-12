@@ -9,6 +9,13 @@ from .processing import (
     ProcessingPreset,
     ProcessingRequest,
 )
+from .quality import (
+    QualityReport,
+    QualitySummary,
+    build_quality_report,
+    load_quality_report,
+    save_quality_report,
+)
 from .raw_preview import RawFilePreview, RawFileSummary, RawPreviewService
 from .storage import StorageCatalog, StorageEntry, StorageRoot
 from .tasks import ProcessingTask, ProcessingTaskManager, TaskBusyError, TaskStatus
@@ -23,6 +30,8 @@ __all__ = [
     "ProcessingRequest",
     "ProcessingTask",
     "ProcessingTaskManager",
+    "QualityReport",
+    "QualitySummary",
     "RawFilePreview",
     "RawFileSummary",
     "RawPreviewService",
@@ -31,4 +40,7 @@ __all__ = [
     "StorageRoot",
     "TaskBusyError",
     "TaskStatus",
+    "build_quality_report",
+    "load_quality_report",
+    "save_quality_report",
 ]

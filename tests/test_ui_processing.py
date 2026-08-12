@@ -1,6 +1,8 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("panel")
@@ -87,3 +89,56 @@ def test_processing_panel_uses_compact_controls_and_responsive_groups(tmp_path: 
     assert panel.ref_mz.width == 150
     assert panel.log_text.sizing_mode == "stretch_width"
     assert any(type(item).__name__ == "FlexBox" for item in layout)
+
+
+def test_processing_panel_loads_quality_and_safe_result_downloads(tmp_path: Path) -> None:
+    panel = _panel(tmp_path)
+    result = panel.outputs.roots[0].path / "sample"
+    result.mkdir()
+    (result / ".meta").write_text("{}", encoding="utf-8")
+    for filename in ("data.csv", "cell-quality.csv", "scmm-manifest.json"):
+        (result / filename).write_text("content", encoding="utf-8")
+    report = SimpleNamespace(
+        summary=SimpleNamespace(
+            cell_count=3,
+            feature_count=2,
+            zero_fraction=0.25,
+            median_total_intensity=10.0,
+            median_detected_features=2.0,
+            embedding_warnings=(),
+        ),
+        cells=pd.DataFrame(
+            {
+                "cell_index": [0, 1, 2],
+                "total_intensity": [5.0, 10.0, 15.0],
+                "detected_features": [1, 2, 2],
+            }
+        ),
+        features=pd.DataFrame({"mz": [100.0, 200.0], "detection_rate": [1.0, 0.5]}),
+        embedding=pd.DataFrame(
+            {
+                "cell_index": [0, 1, 2],
+                "PCA1": [-1.0, 0.0, 1.0],
+                "PCA2": [0.5, -1.0, 0.5],
+            }
+        ),
+    )
+    task = Mock(task_id="b" * 32, result_path=str(result))
+
+    with patch("scMM.ui.processing.load_quality_report", return_value=report):
+        panel._load_quality(task)
+
+    assert panel.quality_section.visible is True
+    assert "细胞事件" in panel.quality_summary.object
+    assert panel.artifact_downloads["data.csv"].disabled is False
+    assert panel.artifact_downloads["feature_meta.csv"].disabled is True
+
+
+def test_processing_panel_rejects_result_outside_output_root(tmp_path: Path) -> None:
+    panel = _panel(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".meta").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="输出根目录"):
+        panel._safe_result_path(str(outside))

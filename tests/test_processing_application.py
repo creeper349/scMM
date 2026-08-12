@@ -77,7 +77,22 @@ def test_processing_preflight_rejects_conflicts_and_output_escape(tmp_path: Path
         planner.outputs.resolve_target("Results", "../escape")
 
     overwrite_plan = planner.preflight(ProcessingRequest(**{**request.__dict__, "overwrite": True}))
-    assert "replaced" in overwrite_plan.warnings[0]
+    assert "overwritten" in overwrite_plan.warnings[0]
+
+
+def test_output_catalog_rejects_hidden_names_and_symlink_targets(tmp_path: Path) -> None:
+    output = tmp_path / "results"
+    outside = tmp_path / "outside"
+    output.mkdir()
+    outside.mkdir()
+    catalog = OutputCatalog((OutputRoot("Results", output),))
+
+    with pytest.raises(ValueError, match="Invalid result name"):
+        catalog.resolve_target("Results", ".scmm-tasks")
+
+    (output / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(PermissionError, match="symbolic link"):
+        catalog.resolve_target("Results", "escape")
 
 
 def test_output_catalog_rejects_duplicate_and_unknown_roots(tmp_path: Path) -> None:
