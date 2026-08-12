@@ -7,6 +7,12 @@
 ```text
 scMM/
 ├── cli.py                 # scmm-process 命令行入口
+├── application/
+│   ├── storage.py         # 挂载目录白名单、路径解析和越界防护
+│   └── raw_preview.py     # TIC、EIC、合并谱和原始文件摘要
+├── ui/
+│   ├── cli.py             # scmm-ui 服务启动入口
+│   └── app.py             # Panel 引导式会话和 Plotly 交互图
 ├── file/
 │   ├── io.py              # mzML/mzXML 文件边界与稳定导出
 │   ├── _spectrum.py       # Orbitrap 网格、谱汇总与峰细化
@@ -33,7 +39,8 @@ scMM/
     └── msplot.py          # EIC、谱和调试图
 ```
 
-测试位于 `tests/`，覆盖数据保存/加载、对齐、去同位素、归一化、谱 I/O、绘图、轨迹和 CLI。
+测试位于 `tests/`，覆盖数据保存/加载、对齐、去同位素、归一化、谱 I/O、路径边界、原始谱
+预览、绘图、轨迹和 CLI。
 
 ## 开发环境
 
@@ -127,6 +134,8 @@ PY
   便于独立验证且避免闭包携带整个调用上下文。
 - 绘图入口只负责编排；输入整理、类别解析、坐标轴配置和标注选择应拆成可单独测试的模块级辅助
   函数。不得通过 `pop()` 等操作修改调用方传入的参数字典。
+- 网页控件不得直接读取任意客户端路径。所有选择必须经过 `StorageCatalog` 的配置根目录和真实路径
+  双重校验；TIC/EIC 等领域计算保留在 `application/`，Panel 回调只管理会话状态和展示。
 
 ## 添加归一化方法
 

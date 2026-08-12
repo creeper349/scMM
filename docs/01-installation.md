@@ -48,12 +48,13 @@ jupyter lab
 | 核心依赖 | 原始谱读取、矩阵处理、保存、归一化、基础统计 |
 | `plot` | Matplotlib/Seaborn、UMAP、Palantir 和轨迹图 |
 | `cluster` | Leiden 与 Louvain 聚类 |
+| `ui` | Panel 引导式网页和 Plotly 原始谱交互图 |
 | `dev` | pytest、Ruff、构建与覆盖率 |
 
 `environment.yml` 已包含项目开发和完整分析所需的科学计算依赖。仅通过 pip 安装时可使用：
 
 ```bash
-python -m pip install -e ".[plot,cluster,dev]"
+python -m pip install -e ".[plot,cluster,ui,dev]"
 ```
 
 但对于 PyOpenMS，仍优先推荐 Conda。
@@ -63,10 +64,11 @@ python -m pip install -e ".[plot,cluster,dev]"
 ```bash
 python -c "import scMM, pyopenms, anndata; print('scMM environment ready')"
 scmm-process --help
+scmm-ui --help
 pytest -q
 ```
 
-如果 `scmm-process` 不存在，通常表示尚未执行可编辑安装，或当前 shell 没有激活
+如果 `scmm-process` 或 `scmm-ui` 不存在，通常表示尚未执行可编辑安装，或当前 shell 没有激活
 `scmm-dev`。
 
 ## 系统资源建议

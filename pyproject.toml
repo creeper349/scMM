@@ -41,6 +41,10 @@ cluster = [
     "networkx>=3.2",
     "python-igraph>=0.11",
 ]
+ui = [
+    "panel>=1.8,<2",
+    "plotly>=6,<7",
+]
 dev = [
     "build>=1.2",
     "pytest>=8",
@@ -50,6 +54,7 @@ dev = [
 
 [project.scripts]
 scmm-process = "scMM.cli:main"
+scmm-ui = "scMM.ui.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -78,3 +83,4 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "scMM/plot/_trajectory.py" = ["E741"]
+"scMM/ui/app.py" = ["RUF001"]
