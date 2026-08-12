@@ -11,6 +11,7 @@ from .processing import (
 )
 from .raw_preview import RawFilePreview, RawFileSummary, RawPreviewService
 from .storage import StorageCatalog, StorageEntry, StorageRoot
+from .tasks import ProcessingTask, ProcessingTaskManager, TaskBusyError, TaskStatus
 
 __all__ = [
     "OutputCatalog",
@@ -20,10 +21,14 @@ __all__ = [
     "ProcessingPlanner",
     "ProcessingPreset",
     "ProcessingRequest",
+    "ProcessingTask",
+    "ProcessingTaskManager",
     "RawFilePreview",
     "RawFileSummary",
     "RawPreviewService",
     "StorageCatalog",
     "StorageEntry",
     "StorageRoot",
+    "TaskBusyError",
+    "TaskStatus",
 ]
