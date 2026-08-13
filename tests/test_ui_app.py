@@ -38,7 +38,8 @@ def test_ui_workspace_loads_selected_file_and_populates_downloads(tmp_path) -> N
     raw_path = tmp_path / "preview.mzML"
     _write_raw_file(raw_path)
     workspace = _workspace(tmp_path)
-    workspace.file_select.value = raw_path.name
+    assert workspace._selector is not None
+    workspace._selector.value = [str(raw_path)]
 
     workspace._load_selected(None)
 
@@ -60,46 +61,44 @@ def test_create_app_returns_template_with_isolated_session(tmp_path) -> None:
 
     assert type(app).__name__ == "FastListTemplate"
     assert app.title == "scMM 数据查看"
+    assert app.sidebar_width == 680
+    assert 'id = "scmm-sidebar-resizer"' in app.sidebar_footer
 
 
-def test_sidebar_uses_compact_responsive_controls(tmp_path) -> None:
+def test_sidebar_restores_default_controls_and_panel_file_selector(tmp_path) -> None:
     workspace = _workspace(tmp_path)
     sidebar = workspace.sidebar()
 
-    compact = (
+    default_width_controls = (
+        workspace.root_select,
         workspace.ms_level,
         workspace.mz_min,
         workspace.mz_max,
         workspace.target_mz,
         workspace.ppm,
+        workspace.rt_range,
     )
-    assert all(widget.width == 96 for widget in compact)
-    assert all(widget.height == 54 for widget in compact)
-    assert all(widget.sizing_mode == "fixed" for widget in compact)
-    assert workspace.root_select.max_width == 180
-    assert workspace.root_select.width is None
-    assert workspace.file_select.width == 180
-    assert workspace.file_select.sizing_mode is None
-    assert workspace.rt_range.width == 180
-    assert workspace.rt_range.sizing_mode is None
-    assert type(sidebar[7]).__name__ == "FlexBox"
-    assert type(sidebar[10]).__name__ == "FlexBox"
+    assert all(widget.width == 300 for widget in default_width_controls[:-1])
+    assert workspace.rt_range.width is None
+    assert all(widget.sizing_mode == "stretch_width" for widget in default_width_controls)
+    assert workspace._selector is not None
+    assert type(workspace._selector).__name__ == "FileSelector"
+    assert workspace._selector.root_directory == str(tmp_path)
+    assert workspace._selector.only_files is True
+    assert workspace._selector.sizing_mode == "stretch_width"
+    assert all(type(item).__name__ != "FlexBox" for item in sidebar)
 
 
-def test_compact_browser_navigates_directories(tmp_path) -> None:
+def test_panel_file_selector_accepts_a_nested_file(tmp_path) -> None:
     nested = tmp_path / "batch"
     nested.mkdir()
     raw_path = nested / "nested.mzML"
     _write_raw_file(raw_path)
     workspace = _workspace(tmp_path)
+    assert workspace._selector is not None
 
-    workspace.file_select.value = "batch"
+    workspace._selector.value = [str(raw_path)]
 
-    assert workspace._browser_directory == nested.relative_to(tmp_path)
-    assert workspace.file_select.options["📄 nested.mzML"] == "batch/nested.mzML"
-    assert workspace.up_button.disabled is False
-
-    workspace.file_select.value = "batch/nested.mzML"
-
-    assert workspace._selected_path == "batch/nested.mzML"
+    assert workspace._selector.value == [str(raw_path)]
     assert workspace.load_button.disabled is False
+    assert "nested.mzML" in workspace.selection_text.object

@@ -23,6 +23,7 @@ from .processing import GuidedProcessingPanel
 pn.extension("plotly", notifications=True, sizing_mode="stretch_width")
 
 _ACCENT = "#0F766E"
+_SIDEBAR_DEFAULT_WIDTH = 680
 _PLOT_CONFIG = {
     "displaylogo": False,
     "responsive": True,
@@ -40,6 +41,120 @@ _STYLESHEET = """
   overflow-wrap: anywhere;
 }
 .scmm-hint { color: #64748b; font-size: 0.92rem; }
+#sidebar {
+  box-sizing: border-box;
+  position: relative;
+}
+#scmm-sidebar-resizer {
+  background: transparent;
+  cursor: col-resize;
+  position: fixed;
+  top: 64px;
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 6px);
+  width: 12px;
+  z-index: 9;
+  touch-action: none;
+}
+#scmm-sidebar-resizer::after {
+  background: color-mix(in srgb, var(--scmm-accent) 48%, transparent);
+  border-radius: 2px;
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 5px;
+  width: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+#scmm-sidebar-resizer:hover::after,
+#scmm-sidebar-resizer:focus-visible::after,
+body.scmm-resizing-sidebar #scmm-sidebar-resizer::after { opacity: 1; }
+#sidebar.hidden #scmm-sidebar-resizer { display: none; }
+body.scmm-resizing-sidebar,
+body.scmm-resizing-sidebar * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+body.scmm-resizing-sidebar #sidebar,
+body.scmm-resizing-sidebar #main { transition: none !important; }
+"""
+
+_SIDEBAR_RESIZE_SCRIPT = f"""
+<script>
+(() => {{
+  const storageKey = "scmm-sidebar-width";
+  const defaultWidth = {_SIDEBAR_DEFAULT_WIDTH};
+
+  function initializeSidebarResizer() {{
+    const sidebar = document.getElementById("sidebar");
+    if (!sidebar || document.getElementById("scmm-sidebar-resizer")) return;
+
+    const handle = document.createElement("div");
+    handle.id = "scmm-sidebar-resizer";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", "调整侧栏宽度");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.tabIndex = 0;
+    sidebar.appendChild(handle);
+
+    const limits = () => ({{
+      min: 640,
+      max: Math.max(640, Math.min(1000, window.innerWidth - 320)),
+    }});
+    const setWidth = (requested, remember = true) => {{
+      const {{min, max}} = limits();
+      const width = Math.round(Math.max(min, Math.min(max, requested)));
+      document.documentElement.style.setProperty("--sidebar-width", `${{width}}px`);
+      handle.setAttribute("aria-valuenow", String(width));
+      if (remember) sessionStorage.setItem(storageKey, String(width));
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+    }};
+
+    const savedWidth = Number(sessionStorage.getItem(storageKey));
+    if (Number.isFinite(savedWidth) && savedWidth > 0) setWidth(savedWidth, false);
+
+    let startX = 0;
+    let startWidth = defaultWidth;
+    const stopDragging = () => {{
+      document.body.classList.remove("scmm-resizing-sidebar");
+      window.removeEventListener("pointermove", drag);
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    }};
+    const drag = (event) => setWidth(startWidth + event.clientX - startX);
+
+    handle.addEventListener("pointerdown", (event) => {{
+      event.preventDefault();
+      startX = event.clientX;
+      startWidth = sidebar.getBoundingClientRect().width;
+      document.body.classList.add("scmm-resizing-sidebar");
+      window.addEventListener("pointermove", drag);
+      window.addEventListener("pointerup", stopDragging);
+      window.addEventListener("pointercancel", stopDragging);
+    }});
+    handle.addEventListener("dblclick", () => setWidth(defaultWidth));
+    handle.addEventListener("keydown", (event) => {{
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      setWidth(sidebar.getBoundingClientRect().width + direction * 20);
+    }});
+    window.addEventListener("resize", () => {{
+      const current = sidebar.getBoundingClientRect().width;
+      const {{max}} = limits();
+      if (current > max) setWidth(max);
+    }});
+  }}
+
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", initializeSidebarResizer, {{once: true}});
+  }} else {{
+    initializeSidebarResizer();
+  }}
+}})();
+</script>
 """
 
 
@@ -57,55 +172,11 @@ class PreviewWorkspace:
         self.tic = pd.DataFrame()
         self.eic = pd.DataFrame()
         self.spectrum = pd.DataFrame()
-        self._browser_directory = Path(".")
-        self._directory_values: set[str] = set()
-        self._selected_path: str | None = None
+        self._selector: pn.widgets.FileSelector | None = None
 
         labels = [root.label for root in self.catalog.roots]
-        self.root_select = pn.widgets.Select(
-            label="数据存储",
-            options=labels,
-            value=labels[0],
-            width=None,
-            min_width=120,
-            max_width=180,
-            sizing_mode="stretch_width",
-        )
-        self.directory_text = pn.pane.Markdown("目录：`/`", width=180, sizing_mode=None)
-        self.file_select = pn.widgets.Select(
-            label="文件夹 / 原始数据",
-            options={"正在读取…": None},
-            value=None,
-            width=180,
-            sizing_mode=None,
-        )
-        self.up_button = pn.widgets.Button(
-            label="上一级",
-            icon="arrow-back-up",
-            width=84,
-            height=34,
-            sizing_mode="fixed",
-        )
-        self.reload_button = pn.widgets.Button(
-            label="刷新",
-            icon="refresh",
-            width=84,
-            height=34,
-            sizing_mode="fixed",
-        )
-        browser_actions = pn.Row(
-            self.up_button,
-            self.reload_button,
-            width=180,
-            sizing_mode=None,
-        )
-        self.selector_area = pn.Column(
-            self.directory_text,
-            self.file_select,
-            browser_actions,
-            width=180,
-            sizing_mode=None,
-        )
+        self.root_select = pn.widgets.Select(label="数据存储", options=labels, value=labels[0])
+        self.selector_area = pn.Column(sizing_mode="stretch_width")
         self.selection_text = pn.pane.Markdown(
             "<span class='scmm-hint'>请选择一个 mzML 或 mzXML 文件。</span>"
         )
@@ -117,33 +188,11 @@ class PreviewWorkspace:
         )
 
         self.summary = pn.pane.Markdown("尚未加载数据。", css_classes=["scmm-card"])
-        self.ms_level = pn.widgets.Select(
-            label="MS",
-            options=[1],
-            value=1,
-            disabled=True,
-            width=96,
-            height=54,
-            sizing_mode="fixed",
-        )
+        self.ms_level = pn.widgets.Select(label="MS level", options=[1], value=1, disabled=True)
         self.target_mz = pn.widgets.FloatInput(
-            label="目标 m/z",
-            value=100.0,
-            step=0.0001,
-            disabled=True,
-            width=96,
-            height=54,
-            sizing_mode="fixed",
+            label="EIC 目标 m/z", value=100.0, step=0.0001, disabled=True
         )
-        self.ppm = pn.widgets.FloatInput(
-            label="ppm",
-            value=5.0,
-            step=0.5,
-            disabled=True,
-            width=96,
-            height=54,
-            sizing_mode="fixed",
-        )
+        self.ppm = pn.widgets.FloatInput(label="ppm 容差", value=5.0, step=0.5, disabled=True)
         self.rt_range = pn.widgets.RangeSlider(
             label="保留时间范围（秒）",
             start=0.0,
@@ -151,25 +200,9 @@ class PreviewWorkspace:
             value=(0.0, 1.0),
             step=0.1,
             disabled=True,
-            width=180,
-            sizing_mode=None,
         )
-        self.mz_min = pn.widgets.FloatInput(
-            label="m/z 下限",
-            value=100.0,
-            disabled=True,
-            width=96,
-            height=54,
-            sizing_mode="fixed",
-        )
-        self.mz_max = pn.widgets.FloatInput(
-            label="m/z 上限",
-            value=1000.0,
-            disabled=True,
-            width=96,
-            height=54,
-            sizing_mode="fixed",
-        )
+        self.mz_min = pn.widgets.FloatInput(label="谱图 m/z 下限", value=100.0, disabled=True)
+        self.mz_max = pn.widgets.FloatInput(label="谱图 m/z 上限", value=1000.0, disabled=True)
         self.average_spectrum = pn.widgets.Checkbox(label="显示平均谱", value=False, disabled=True)
         self.refresh_button = pn.widgets.Button(
             label="应用范围并刷新",
@@ -225,11 +258,8 @@ class PreviewWorkspace:
 
         self.tabs = pn.Tabs(dynamic=True, sizing_mode="stretch_both")
         self._build_tabs()
-        self._refresh_browser()
+        self._replace_selector()
         self.root_select.param.watch(self._on_root_change, "value")
-        self.file_select.param.watch(self._on_browser_selection, "value")
-        self.up_button.on_click(self._go_to_parent)
-        self.reload_button.on_click(self._reload_browser)
         self.load_button.on_click(self._load_selected)
         self.refresh_button.on_click(self._refresh_all)
         self.spectrum_pane.param.watch(self._use_clicked_mz, "click_data")
@@ -283,22 +313,6 @@ class PreviewWorkspace:
 
     def sidebar(self) -> pn.Column:
         """Build the guided control column."""
-        preview_inputs = pn.FlexBox(
-            self.ms_level,
-            self.mz_min,
-            self.mz_max,
-            self.average_spectrum,
-            gap="8px",
-            align_items="flex-end",
-            sizing_mode="stretch_width",
-        )
-        eic_inputs = pn.FlexBox(
-            self.target_mz,
-            self.ppm,
-            gap="8px",
-            align_items="flex-end",
-            sizing_mode="stretch_width",
-        )
         return pn.Column(
             "### 1. 选择数据",
             self.root_select,
@@ -306,83 +320,58 @@ class PreviewWorkspace:
             self.load_button,
             pn.layout.Divider(),
             "### 2. 查看范围",
+            self.ms_level,
             self.rt_range,
-            preview_inputs,
+            self.mz_min,
+            self.mz_max,
+            self.average_spectrum,
             pn.layout.Divider(),
             "### 3. 提取离子流",
-            eic_inputs,
+            self.target_mz,
+            self.ppm,
             self.refresh_button,
             sizing_mode="stretch_width",
         )
 
-    def _refresh_browser(self) -> None:
-        entries = tuple(
-            entry
-            for entry in self.catalog.list_entries(self.root_select.value, self._browser_directory)
-            if not entry.name.startswith(".")
+    def _replace_selector(self) -> None:
+        root = self.catalog.root(self.root_select.value)
+        selector = pn.widgets.FileSelector(
+            directory=str(root.path),
+            root_directory=str(root.path),
+            file_pattern="*.mz*",
+            only_files=True,
+            show_hidden=False,
+            size=10,
+            sizing_mode="stretch_width",
         )
-        self._directory_values = {
-            entry.relative_path.as_posix() for entry in entries if entry.is_directory
-        }
-        options: dict[str, str | None] = {"请选择…": None}
-        for entry in entries:
-            prefix = "📁 " if entry.is_directory else "📄 "
-            options[f"{prefix}{entry.name}"] = entry.relative_path.as_posix()
-        if len(options) == 1:
-            options = {"当前目录没有可浏览的数据": None}
-
-        relative = self._browser_directory.as_posix()
-        self.directory_text.object = f"目录：`/{'' if relative == '.' else relative}`"
-        self.up_button.disabled = self._browser_directory == Path(".")
-        self.file_select.param.update(options=options, value=None)
+        selector.param.watch(self._on_file_selection, "value")
+        self._selector = selector
+        self.selector_area[:] = [selector]
+        self._on_file_selection(None)
 
     def _on_root_change(self, _event) -> None:
-        self._browser_directory = Path(".")
-        self._selected_path = None
-        self._refresh_browser()
-        self._update_file_selection()
+        self._replace_selector()
 
-    def _on_browser_selection(self, event) -> None:
-        selected = event.new
-        if selected is None:
-            return
-        if selected in self._directory_values:
-            self._browser_directory = Path(selected)
-            self._selected_path = None
-            self._refresh_browser()
-        else:
-            self._selected_path = selected
-        self._update_file_selection()
-
-    def _go_to_parent(self, _event) -> None:
-        if self._browser_directory == Path("."):
-            return
-        parent = self._browser_directory.parent
-        self._browser_directory = Path(".") if parent == Path(".") else parent
-        self._selected_path = None
-        self._refresh_browser()
-        self._update_file_selection()
-
-    def _reload_browser(self, _event) -> None:
-        self._selected_path = None
-        self._refresh_browser()
-        self._update_file_selection()
-
-    def _update_file_selection(self) -> None:
-        self.load_button.disabled = self._selected_path is None
-        if self._selected_path is None:
-            self.selection_text.object = "请选择一个 mzML 或 mzXML 文件。"
+    def _on_file_selection(self, _event) -> None:
+        selected = self._selector.value if self._selector is not None else []
+        self.load_button.disabled = len(selected) != 1
+        if len(selected) == 1:
+            selected_path = str(selected[0])
+            self.selection_text.object = f"已选择：`{Path(selected_path).name}`"
+            self.processing.set_input(self.root_select.value, selected_path)
+        elif len(selected) > 1:
+            self.selection_text.object = "一次只能预览一个文件，请只保留一个选择。"
             self.processing.set_input(None, None)
         else:
-            self.selection_text.object = f"已选择：`{self._selected_path}`"
-            self.processing.set_input(self.root_select.value, self._selected_path)
+            self.selection_text.object = "请选择一个 mzML 或 mzXML 文件。"
+            self.processing.set_input(None, None)
 
     def _load_selected(self, _event) -> None:
-        if self._selected_path is None:
+        if self._selector is None or len(self._selector.value) != 1:
             return
         self.load_button.loading = True
         try:
-            preview = self.service.open(self.root_select.value, self._selected_path)
+            preview = self.service.open(self.root_select.value, self._selector.value[0])
             self.preview = preview
             self._configure_controls(preview)
             self._calculate_all()
@@ -518,7 +507,8 @@ def create_app(
         header_background=_ACCENT,
         sidebar=[workspace.sidebar()],
         main=[workspace.tabs],
-        sidebar_width=390,
+        sidebar_width=_SIDEBAR_DEFAULT_WIDTH,
+        sidebar_footer=_SIDEBAR_RESIZE_SCRIPT,
         theme_toggle=True,
         raw_css=[_STYLESHEET],
     )
