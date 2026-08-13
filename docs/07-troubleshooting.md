@@ -24,14 +24,13 @@
 确认当前解释器属于项目环境：
 
 ```bash
-conda activate scmm-dev
-which python
-python -c "import pyopenms, numpy, pandas, anndata"
-python -m pip install --no-deps -e .
+uv sync --locked --all-extras --dev
+uv run --locked python -c "import sys; print(sys.executable)"
+uv run --locked python -c "import pyopenms, numpy, pandas, anndata"
 ```
 
-Notebook 中还应检查右上角内核是否为 `scMM`/`scmm-dev`。终端激活环境不会自动切换已经打开的
-Notebook 内核。
+解释器应位于仓库的 `.venv`。Notebook 中还应检查右上角内核是否为 `scMM`/`scmm`，或直接
+选择 `.venv/bin/python`；终端中的环境不会自动切换已经打开的 Notebook 内核。
 
 ### 输入目录没有发现 mzML/mzXML
 
@@ -167,11 +166,10 @@ n_neighbors = min(15, adata.n_obs - 1)
 ### 缺少 Leiden/Louvain 依赖
 
 ```bash
-conda install -n scmm-dev -c conda-forge python-igraph leidenalg networkx
+uv sync --locked --all-extras --dev
 ```
 
-然后重启 Notebook 内核。仅安装 `igraph` 的另一个同名 Python 包可能不是期望的
-`python-igraph` 构建。
+然后重启 Notebook 内核。项目声明的是 `python-igraph`；不要手工安装另一个同名 `igraph` 包。
 
 ### UMAP 每次变化
 

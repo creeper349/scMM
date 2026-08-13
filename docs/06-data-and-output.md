@@ -159,7 +159,7 @@ AnnData
 每次正式运行建议同时归档：
 
 1. 原始 mzML/mzXML 的只读副本或校验和。
-2. `environment.yml` 和 `pyproject.toml`。
+2. `uv.lock` 和 `pyproject.toml`。
 3. Git 提交 ID：`git rev-parse HEAD`。
 4. Notebook 参数单元或单独的参数 YAML/JSON。
 5. 日志输出。

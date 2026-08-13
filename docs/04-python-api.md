@@ -212,7 +212,7 @@ left.alignwith(right, ppm_tol=5, mz_merge_options="union")
 ## 命令行批处理
 
 ```bash
-scmm-process raw-data/ results \
+uv run --locked scmm-process raw-data/ results \
   --ref-mz 734.5929 \
   --ppm-tol 10 \
   --resolution 35000 \

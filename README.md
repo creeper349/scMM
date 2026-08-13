@@ -22,10 +22,11 @@ mzML/mzXML 原始谱构建“细胞 × m/z 特征”矩阵，并完成细胞事�
 创建环境并安装项目：
 
 ```bash
-conda env create -f environment.yml
-conda activate scmm-dev
-python -m pip install --no-deps -e .
+uv sync --locked --all-extras --dev
 ```
+
+该命令根据 `pyproject.toml` 和已提交的 `uv.lock` 创建项目专用 `.venv`，并以可编辑模式安装
+scMM。后续命令统一通过 `uv run` 执行，无需手工激活环境。
 
 打开 [scMM_workflow.ipynb](scMM_workflow.ipynb)，至少修改：
 
@@ -40,8 +41,8 @@ REF_MZ = 734.5929  # 必须换成实验使用的参考离子
 也可以直接使用命令行：
 
 ```bash
-scmm-process input.mzML results --ref-mz 734.5929
-scmm-process raw-data/ results --ref-mz 734.5929 --jobs 4
+uv run --locked scmm-process input.mzML results --ref-mz 734.5929
+uv run --locked scmm-process raw-data/ results --ref-mz 734.5929 --jobs 4
 ```
 
 或使用 Python API：
@@ -68,7 +69,7 @@ reloaded = CyESIData.load_from_processed(result_dir)
 在本机启动引导式网页，用服务器已经挂载的目录直接选择、预览并处理原始数据：
 
 ```bash
-scmm-ui \
+uv run --locked scmm-ui \
   --storage "原始数据=/mnt/ms-data" \
   --output "处理结果=/mnt/scmm-results" \
   --address 0.0.0.0 \
@@ -81,11 +82,12 @@ scmm-ui \
 
 ## 支持范围
 
-- Python：3.11–3.13；推荐使用 `environment.yml` 固定的 Python 3.12。
+- Python：3.11–3.12；`.python-version` 将本地开发默认固定为 Python 3.12。
 - 原始谱：mzML、mzXML。
 - 核心依赖：PyOpenMS、NumPy、pandas、SciPy、scikit-learn、AnnData。
 - 可选分析：Matplotlib、Seaborn、UMAP、Palantir、Leiden/Louvain。
-- 网页 UI：Panel、Plotly、UMAP；`environment.yml` 已包含，pip 安装时使用 `scMM[ui]`。
+- 网页 UI：Panel、Plotly、UMAP；执行完整同步时已包含，也可单独使用
+  `uv sync --locked --extra ui`。
 
 项目当前版本为 `0.2.0`，开发状态为 Alpha。正式分析前应使用标准样品和实验质控数据验证
 参考离子、ppm 容差、SNR 阈值及归一化方案。

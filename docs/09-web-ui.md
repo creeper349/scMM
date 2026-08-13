@@ -31,14 +31,13 @@
 只允许本机浏览器访问：
 
 ```bash
-conda activate scmm-dev
-scmm-ui --storage "原始数据=/mnt/ms-data" --port 5006 --show
+uv run --locked scmm-ui --storage "原始数据=/mnt/ms-data" --port 5006 --show
 ```
 
 同时允许局域网和 Tailscale 访问：
 
 ```bash
-scmm-ui \
+uv run --locked scmm-ui \
   --storage "原始数据=/mnt/ms-data" \
   --output "处理结果=/mnt/scmm-results" \
   --storage "归档=/mnt/ms-archive" \
@@ -51,7 +50,7 @@ scmm-ui \
 提供 `--allow-websocket-origin HOST:PORT`：
 
 ```bash
-scmm-ui \
+uv run --locked scmm-ui \
   --storage "原始数据=/mnt/ms-data" \
   --address 0.0.0.0 \
   --port 5006 \

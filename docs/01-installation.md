@@ -2,44 +2,45 @@
 
 [返回文档索引](README.md)
 
-## 推荐方式：Conda
+## 推荐方式：uv
 
-PyOpenMS 等科学计算包包含编译组件，项目使用 Conda 保持版本组合一致：
-
-```bash
-conda env create -f environment.yml
-conda activate scmm-dev
-python -m pip install --no-deps -e .
-```
-
-这里的 `--no-deps` 是有意的：依赖已经由 `environment.yml` 安装，避免 pip 再解析并替换
-Conda 提供的二进制包。`-e` 表示可编辑安装，修改本地 `scMM/` 代码后无需重新安装。
-
-环境文件更新后执行：
+先按 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 安装 uv，然后在仓库
+根目录同步完整环境：
 
 ```bash
-conda env update -f environment.yml --prune
-python -m pip install --no-deps -e .
+uv sync --locked --all-extras --dev
 ```
 
-`--prune` 会移除不再出现在环境定义中的包；如环境中还安装了个人使用的软件，执行前应先确认。
+uv 会读取 `.python-version`，在需要时安装 Python 3.12，并根据 `uv.lock` 创建项目专用 `.venv`。
+项目会以可编辑模式安装，修改本地 `scMM/` 后无需重新安装。不要再用 pip 向 `.venv` 手工添加
+长期依赖；发布依赖通过 `uv add` 管理，开发工具通过 `uv add --dev` 管理。
+
+当前正式支持 Python 3.11–3.12。项目把 PyOpenMS 和核心数值栈限制在本机及 CI 已验证的兼容
+范围；PyOpenMS 3.3 没有 CPython 3.13 wheel，因此在新 PyOpenMS 版本通过部署机器的 CPU、原始谱
+读写和完整测试前，不应只为追新版本移除这些上限。
+
+日常拉取代码后严格复用锁文件：
+
+```bash
+uv sync --locked --all-extras --dev
+```
+
+只有明确升级依赖时才运行 `uv lock --upgrade`，并将 `pyproject.toml` 与 `uv.lock` 的变更一起审阅、
+测试和提交。`uv sync` 默认精确同步，会移除未声明的包，因此临时工具优先使用 `uvx` 或
+`uv run --with <package>`。
 
 ## 使用 Notebook
 
-如果当前 Jupyter/JupyterLab 环境尚未提供 notebook 界面和内核注册工具，可在项目环境中安装：
+完整同步已经包含 `notebook` extra。启动项目内的 JupyterLab：
 
 ```bash
-conda install -n scmm-dev -c conda-forge jupyterlab ipykernel
-conda activate scmm-dev
-python -m ipykernel install --user --name scmm-dev --display-name scMM
-jupyter lab
+uv run --locked python -m ipykernel install --user --name scmm --display-name scMM
+uv run --locked jupyter lab
 ```
 
-打开项目根目录的 `scMM_workflow.ipynb`，选择显示名为 `scMM` 的内核。Notebook 的功能和
-参数见[参数化 Notebook 工作流](02-notebook-workflow.md)。
-
-如果使用其他环境启动 Jupyter，也可以只把 `scmm-dev` 注册成内核，不需要在两个环境中
-重复安装所有科学计算依赖。
+打开项目根目录的 `scMM_workflow.ipynb`，选择显示名为 `scMM`、内部名称为 `scmm` 的内核。
+VS Code 也可直接选择仓库内的 `.venv/bin/python`。Notebook 的功能和参数见
+[参数化 Notebook 工作流](02-notebook-workflow.md)。
 
 ## 依赖分组
 
@@ -49,27 +50,36 @@ jupyter lab
 | `plot` | Matplotlib/Seaborn、UMAP、Palantir 和轨迹图 |
 | `cluster` | Leiden 与 Louvain 聚类 |
 | `ui` | Panel 引导式网页、Plotly 原始谱/质量图和 UMAP 质量检查 |
-| `dev` | pytest、Ruff、构建与覆盖率 |
+| `notebook` | JupyterLab 与项目内核 |
+| `dev` 依赖组 | pytest、Ruff、构建与覆盖率；不进入发布包依赖 |
 
-`environment.yml` 已包含项目开发和完整分析所需的科学计算依赖。仅通过 pip 安装时可使用：
+仅运行核心处理可使用：
 
 ```bash
-python -m pip install -e ".[plot,cluster,ui,dev]"
+uv sync --locked --no-dev
 ```
 
-但对于 PyOpenMS，仍优先推荐 Conda。
+按需启用功能，例如：
+
+```bash
+uv sync --locked --extra plot --extra cluster
+uv sync --locked --extra ui
+```
+
+仓库开发和 PR 验证统一使用 `uv sync --locked --all-extras --dev`，确保 notebook、分析和网页
+入口共享同一份锁文件。
 
 ## 验证安装
 
 ```bash
-python -c "import scMM, pyopenms, anndata; print('scMM environment ready')"
-scmm-process --help
-scmm-ui --help
-pytest -q
+uv run --locked python -c "import scMM, pyopenms, anndata; print('scMM environment ready')"
+uv run --locked scmm-process --help
+uv run --locked scmm-ui --help
+uv run --locked pytest -q
 ```
 
-如果 `scmm-process` 或 `scmm-ui` 不存在，通常表示尚未执行可编辑安装，或当前 shell 没有激活
-`scmm-dev`。
+如果入口不存在，先运行 `uv sync --locked --all-extras --dev`，并确认命令从包含 `pyproject.toml`
+的仓库目录执行。
 
 ## 系统资源建议
 

@@ -101,7 +101,7 @@ def _leiden_labels(
     except ImportError as exc:
         raise ImportError(
             "Leiden clustering requires igraph and leidenalg. "
-            "Install the Conda packages python-igraph and leidenalg."
+            "Run 'uv sync --locked --extra cluster' or install python-igraph and leidenalg."
         ) from exc
 
     graph = ig.Graph(n=n_cells, edges=edges, directed=False)
@@ -127,7 +127,9 @@ def _louvain_labels(
         import networkx as nx
         from networkx.algorithms.community import louvain_communities
     except ImportError as exc:
-        raise ImportError("Louvain clustering requires the Conda package networkx.") from exc
+        raise ImportError(
+            "Louvain clustering requires networkx; run 'uv sync --locked --extra cluster'."
+        ) from exc
 
     graph = nx.Graph()
     graph.add_nodes_from(range(n_cells))

@@ -50,27 +50,28 @@ scMM/
 ## 开发环境
 
 ```bash
-conda env create -f environment.yml
-conda activate scmm-dev
-python -m pip install --no-deps -e .
+uv sync --locked --all-extras --dev
 ```
 
-更新环境：
+修改依赖时使用 `uv add`/`uv remove`，或编辑 `pyproject.toml` 后重新锁定：
 
 ```bash
-conda env update -f environment.yml --prune
-python -m pip install --no-deps -e .
+uv lock
+uv sync --locked --all-extras --dev
 ```
+
+依赖升级应单独执行 `uv lock --upgrade`，避免普通环境同步意外改变已验证版本。
 
 ## 完整验证
 
 从仓库根目录运行：
 
 ```bash
-ruff format --check .
-ruff check .
-pytest -W error
-python -m build
+uv lock --check
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked pytest -W error
+uv build --no-sources
 ```
 
 `pytest -W error` 会把警告提升为错误，有助于尽早发现 pandas、NumPy、scikit-learn 或 PyOpenMS
@@ -79,15 +80,15 @@ python -m build
 只运行相关测试：
 
 ```bash
-pytest tests/test_data.py -q
-pytest tests/test_io.py -q
-pytest tests/test_trajectory.py -q
+uv run --locked pytest tests/test_data.py -q
+uv run --locked pytest tests/test_io.py -q
+uv run --locked pytest tests/test_trajectory.py -q
 ```
 
 覆盖率：
 
 ```bash
-pytest --cov=scMM --cov-report=term-missing
+uv run --locked pytest --cov=scMM --cov-report=term-missing
 ```
 
 ## Notebook 检查
@@ -104,8 +105,8 @@ pytest --cov=scMM --cov-report=term-missing
 基本结构和语法检查可以在没有科学计算依赖时完成：
 
 ```bash
-python -m json.tool scMM_workflow.ipynb >/dev/null
-python - <<'PY'
+uv run --locked python -m json.tool scMM_workflow.ipynb >/dev/null
+uv run --locked python - <<'PY'
 import ast
 import json
 
@@ -119,7 +120,7 @@ print("notebook syntax OK")
 PY
 ```
 
-这不能代替在 `scmm-dev` 环境中使用代表性 mzML 执行整个流程。
+这不能代替在 uv 管理的项目环境中使用代表性 mzML 执行整个流程。
 
 ## API 设计约定
 
@@ -187,10 +188,13 @@ def run_custom(X, params):
 ## 发布前检查
 
 ```bash
-python -m build
-python -m pip install --force-reinstall dist/*.whl
-scmm-process --help
-pytest -W error
+uv lock --check
+uv sync --locked --all-extras --dev
+uv run --locked pytest -W error
+uv build --no-sources
+uv run --isolated --no-project \
+  --with "$(find dist -maxdepth 1 -name '*.whl' -print -quit)" \
+  scmm-process --help
 ```
 
 还应在受支持的 Python 版本和至少一个代表性 mzML/mzXML 文件上完成端到端验证。

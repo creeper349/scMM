@@ -5,7 +5,7 @@
 ## 入门
 
 1. [安装与环境配置](01-installation.md)
-   - Conda 环境、可编辑安装、Jupyter 内核、可选依赖和安装验证。
+   - uv 锁定环境、可编辑安装、Jupyter 内核、可选依赖和安装验证。
 2. [参数化 Notebook 工作流](02-notebook-workflow.md)
    - 输入准备、运行顺序、功能开关、输出位置和典型配置。
 3. [参数默认值、含义与推荐](03-parameters.md)

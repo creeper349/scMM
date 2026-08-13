@@ -6,7 +6,7 @@
 
 - **Notebook 默认值**：`scMM_workflow.ipynb` 顶部参数单元中的值。
 - **Python API 默认值**：函数签名中的值。
-- **CLI 默认值**：`scmm-process --help` 显示的值。
+- **CLI 默认值**：`uv run --locked scmm-process --help` 显示的值。
 
 推荐值是起始范围，不是仪器或实验的通用最优值。最终参数应由标准品、空白、批内质控和已知
 参考离子验证。
@@ -156,7 +156,7 @@ Notebook 和 API 的默认方法都是 `total`；Notebook 默认额外传入 `sc
 ## CLI 参数
 
 ```text
-scmm-process INPUT OUTPUT --ref-mz REF_MZ [options]
+uv run --locked scmm-process INPUT OUTPUT --ref-mz REF_MZ [options]
 ```
 
 | 参数 | 默认值 | 含义 |

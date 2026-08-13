@@ -79,7 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         import panel as pn
     except ImportError as exc:
         raise RuntimeError(
-            "Web UI dependencies are not installed; install scMM[ui] or use environment.yml"
+            "Web UI dependencies are not installed; "
+            "run 'uv sync --locked --extra ui' or install scMM[ui]"
         ) from exc
 
     from .app import create_app
