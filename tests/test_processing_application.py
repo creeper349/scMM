@@ -19,7 +19,7 @@ def _planner(tmp_path: Path):
     raw.mkdir()
     output.mkdir()
     source = raw / "sample.mzML"
-    source.write_bytes(b"raw-data")
+    source.write_bytes(b"<mzML><spectrum></spectrum></mzML>")
     planner = ProcessingPlanner(
         StorageCatalog((StorageRoot("Raw", raw),)),
         OutputCatalog((OutputRoot("Results", output),)),
@@ -58,7 +58,21 @@ def test_processing_preflight_resolves_safe_input_and_output(tmp_path: Path) -> 
     assert plan.input_path == source.resolve()
     assert plan.output_root == output.resolve()
     assert plan.result_path == output.resolve() / "sample"
-    assert plan.input_size_bytes == len(b"raw-data")
+    assert plan.input_size_bytes == len(b"<mzML><spectrum></spectrum></mzML>")
+
+
+def test_processing_preflight_rejects_truncated_input(tmp_path: Path) -> None:
+    planner, source, _ = _planner(tmp_path)
+    source.write_bytes(b"<indexedmzML><mzML><spectrum></spectrum></mzML>")
+    request = ProcessingRequest(
+        storage_label="Raw",
+        input_path="sample.mzML",
+        output_label="Results",
+        parameters=ProcessingParameters(ref_mz=100),
+    )
+
+    with pytest.raises(ValueError, match=r"XML 文档不完整.*重新转换"):
+        planner.preflight(request)
 
 
 def test_processing_preflight_rejects_conflicts_and_output_escape(tmp_path: Path) -> None:

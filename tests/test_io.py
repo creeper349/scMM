@@ -3,6 +3,7 @@ import pyopenms as oms
 import pytest
 
 from scMM.file.io import (
+    InvalidMSFileError,
     _prepare_sorted_unique_peaks,
     align_frame,
     build_orbitrap_grid,
@@ -109,6 +110,29 @@ def test_load_single_file_infers_mzxml_by_default(tmp_path) -> None:
 
     assert experiment.getNrSpectra() == 2
     assert metadata["name"] == "synthetic"
+
+
+def test_load_single_file_rejects_truncated_mzml_with_actionable_error(tmp_path) -> None:
+    output = tmp_path / "truncated.mzML"
+    output.write_text(
+        '<?xml version="1.0"?><indexedmzML><mzML><spectrumList count="1">'
+        '<spectrum id="scan=1"></spectrum></spectrumList></mzML>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidMSFileError, match=r"XML 文档不完整.*重新转换"):
+        load_single_file(output)
+
+
+def test_load_single_file_rejects_mzml_without_spectra(tmp_path) -> None:
+    output = tmp_path / "empty.mzML"
+    output.write_text(
+        '<?xml version="1.0"?><mzML><spectrumList count="0"></spectrumList></mzML>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidMSFileError, match="没有质谱扫描"):
+        load_single_file(output)
 
 
 def test_extract_peaks_supports_centroid_intensity_modes() -> None:

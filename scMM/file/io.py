@@ -1,6 +1,7 @@
 """Mass-spectrometry file boundaries and stable public I/O exports."""
 
 import logging
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,14 @@ from ._spectrum import (
 
 logger = logging.getLogger(__name__)
 
+_XML_SCAN_BYTES = 64 * 1024
+_MZML_SPECTRUM_TAG = re.compile(rb"<spectrum(?:\s|>)")
+_MZXML_SCAN_TAG = re.compile(rb"<scan(?:\s|>)")
+
+
+class InvalidMSFileError(ValueError):
+    """Raised when a mass-spectrometry XML file cannot provide spectra."""
+
 
 def load_single_file(
     path: str | Path,
@@ -30,14 +39,87 @@ def load_single_file(
     if not path.is_file():
         raise FileNotFoundError(path)
     resolved_format = _resolve_ms_format(path, format)
+    validate_ms_file(path, format=resolved_format)
     experiment = oms.MSExperiment()
-    if resolved_format == "mzML":
-        oms.MzMLFile().load(str(path), experiment)
-    else:
-        oms.MzXMLFile().load(str(path), experiment)
+    try:
+        if resolved_format == "mzML":
+            oms.MzMLFile().load(str(path), experiment)
+        else:
+            oms.MzXMLFile().load(str(path), experiment)
+    except RuntimeError as exc:
+        raise InvalidMSFileError(
+            f"无法读取 {path.name}: {resolved_format} 解析失败, 文件可能已截断或转换不完整; "
+            "请从对应的原始数据重新转换后再试。"
+        ) from exc
+    if experiment.getNrSpectra() == 0:
+        raise InvalidMSFileError(
+            f"无法读取 {path.name}: 文件中没有质谱扫描; 请检查转换设置, "
+            "并从对应的原始数据重新转换。"
+        )
     metadata = _file_metadata(path, experiment)
     logger.info("Loaded MS file from %s", path)
     return experiment, metadata
+
+
+def validate_ms_file(
+    path: str | Path,
+    format: Literal["auto", "mzML", "mzXML"] = "auto",
+) -> None:
+    """Quickly reject truncated XML files or files without spectrum records.
+
+    The check reads only the document header, tail, and data up to the first
+    spectrum tag. It is intended for interactive preflight; OpenMS remains the
+    authoritative parser during :func:`load_single_file`.
+    """
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    resolved_format = _resolve_ms_format(path, format)
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(_XML_SCAN_BYTES)
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - _XML_SCAN_BYTES))
+            tail = handle.read()
+    except OSError as exc:
+        raise InvalidMSFileError(f"无法读取 {path.name}: {exc}") from exc
+
+    if resolved_format == "mzML":
+        indexed = re.search(rb"<indexedmzML(?:\s|>)", header) is not None
+        root_tag = b"<indexedmzML" if indexed else b"<mzML"
+        closing_tag = b"</indexedmzML>" if indexed else b"</mzML>"
+        data_tag = _MZML_SPECTRUM_TAG
+    else:
+        root_tag = b"<mzXML"
+        closing_tag = b"</mzXML>"
+        data_tag = _MZXML_SCAN_TAG
+
+    if root_tag not in header:
+        raise InvalidMSFileError(
+            f"无法读取 {path.name}: 内容不是有效的 {resolved_format} XML 文档。"
+        )
+    if closing_tag not in tail:
+        raise InvalidMSFileError(
+            f"无法读取 {path.name}: XML 文档不完整 (缺少 {closing_tag.decode()}); "
+            "文件很可能在转换或复制时被截断, 请从对应的原始数据重新转换。"
+        )
+    if not _contains_data_tag(path, data_tag):
+        raise InvalidMSFileError(
+            f"无法读取 {path.name}: 文件中没有质谱扫描; 请检查转换设置, "
+            "并从对应的原始数据重新转换。"
+        )
+
+
+def _contains_data_tag(path: Path, pattern: re.Pattern[bytes]) -> bool:
+    overlap = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(_XML_SCAN_BYTES):
+            combined = overlap + chunk
+            if pattern.search(combined):
+                return True
+            overlap = combined[-32:]
+    return False
 
 
 def _resolve_ms_format(path: Path, requested: str) -> str:
@@ -129,6 +211,7 @@ def _add_spectrum(experiment: oms.MSExperiment, spectrum, error_message: str) ->
 
 
 __all__ = [
+    "InvalidMSFileError",
     "_prepare_sorted_unique_peaks",
     "align_frame",
     "build_orbitrap_grid",
@@ -140,4 +223,5 @@ __all__ = [
     "save_spectra",
     "sum_spec",
     "sum_spectrum_from_file",
+    "validate_ms_file",
 ]

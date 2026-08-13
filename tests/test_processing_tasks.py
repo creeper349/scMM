@@ -27,7 +27,7 @@ def _manager(tmp_path: Path):
     raw.mkdir()
     output.mkdir()
     source = raw / "sample.mzML"
-    source.write_bytes(b"raw")
+    source.write_bytes(b"<mzML><spectrum></spectrum></mzML>")
     planner = ProcessingPlanner(
         StorageCatalog((StorageRoot("Raw", raw),)),
         OutputCatalog((OutputRoot("Results", output),)),

@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from scMM.file.io import validate_ms_file
+
 from .storage import StorageCatalog
 
 ProcessingPreset = Literal["balanced", "sensitive", "strict"]
@@ -170,6 +172,7 @@ class ProcessingPlanner:
     def preflight(self, request: ProcessingRequest) -> ProcessingPlan:
         """Resolve request boundaries and report non-fatal capacity warnings."""
         source = self.storage.resolve_raw_file(request.storage_label, request.input_path)
+        validate_ms_file(source)
         result_name = request.result_name or source.stem
         target = self.outputs.resolve_target(request.output_label, result_name)
         if target.exists() and not request.overwrite:

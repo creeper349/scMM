@@ -17,7 +17,7 @@ def _panel(tmp_path: Path):
     raw.mkdir()
     output.mkdir()
     source = raw / "sample.mzML"
-    source.write_bytes(b"raw")
+    source.write_bytes(b"<mzML><spectrum></spectrum></mzML>")
     panel = GuidedProcessingPanel(
         StorageCatalog((StorageRoot("Raw", raw),)),
         (OutputRoot("Results", output),),
