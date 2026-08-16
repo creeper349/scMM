@@ -159,6 +159,14 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# Project-local generated files
+.tmp/
+output.log
+
+# Editors
+.idea/
+.vscode/
+
 # Pyre type checker
 .pyre/
 
@@ -206,8 +214,10 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+.tmp/
 data/
-file/
+results/
+files/
 *.png
 *.jpg
 *.jpeg
