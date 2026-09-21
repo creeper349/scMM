@@ -3,7 +3,7 @@ from scipy.ndimage import median_filter
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
-def r1_decomposition(X:np.ndarray, tol:float=1e-6, max_iter:int = 100, dtype = np.float64):
+def r1_decomposition(X:np.ndarray, tol:float=1e-6, max_iter:int = 100, dtype = np.float32):
     """
     Generate two vectors to approximate the input matrix X by their dot product.
     i.e. Find a, b to minimize ||X - a b^T||_F
@@ -29,7 +29,7 @@ def r1_decomposition(X:np.ndarray, tol:float=1e-6, max_iter:int = 100, dtype = n
 def _filter(data:np.ndarray, size:int = 10, filter = median_filter, **filter_kwargs):
     return filter(data, size = (size, 1), **filter_kwargs)
 
-def _optimize_single_channel(s:np.ndarray, b:np.ndarray, lam=0.5, sigma_min=1e-3, tau=2.0, max_iter=50, tol=1e-4, dtype=np.float64):
+def _optimize_single_channel(s:np.ndarray, b:np.ndarray, lam=0.5, sigma_min=1e-3, tau=2.0, max_iter=50, tol=1e-4, dtype=np.float32):
 
     r = s - b
     sigma = np.maximum(np.std(r), sigma_min)
@@ -61,7 +61,7 @@ def peak_recon(S:np.ndarray, B:np.ndarray,
                tau:float = 2.0,
                max_iter:int = 50, 
                n_jobs=-1,
-               dtype=np.float64):
+               dtype=np.float32):
     """
     Function to reconstruct CyESI signal by separating gaussian baseline and sparse peaks.
     

@@ -2,17 +2,20 @@ import numpy as np
 import os
 import json
 import pandas as pd
+import pyopenms as oms
 import logging
 import math
-from joblib import Parallel, delayed
+import gc
+import ctypes
+from pathlib import Path
+from joblib import Parallel, delayed, effective_n_jobs
+from tqdm.auto import tqdm
 from anndata import AnnData
 
 from .io import (load_single_file, 
                  sum_spec, 
                  extract_peaks, 
-                 align_frame, 
-                 sum_spectrum_from_file, 
-                 pack_specs)
+                 align_frame)
 from ..util.peak import filter_spectrum, find_cell_peaks
 from ..util.normalize import normalize
 from ..util.annotation import SDFMzSearcher, DEFAULT_ADDUCTS_NEG, DEFAULT_ADDUCTS_POS
@@ -24,20 +27,144 @@ from sklearn.ensemble import IsolationForest
 
 DebugHook = Callable[[str, Dict[str, Any]], None]
 
+
+def _log_memory_usage(message: str) -> None:
+    """Log process RSS/peak RSS and Linux cgroup memory usage.
+
+    This helper intentionally has no external dependency such as ``psutil``.  It
+    reads Linux ``/proc`` and cgroup-v2 files directly and silently degrades when
+    those files are unavailable.
+    """
+
+    def _to_gib(value: int) -> float:
+        return value / (1024 ** 3)
+
+    rss_bytes = None
+    hwm_bytes = None
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    rss_bytes = int(line.split()[1]) * 1024
+                elif line.startswith("VmHWM:"):
+                    hwm_bytes = int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+
+    cgroup_current = None
+    cgroup_limit = None
+    try:
+        path = Path("/sys/fs/cgroup/memory.current")
+        if path.exists():
+            cgroup_current = int(path.read_text().strip())
+        else:
+            # cgroup v1 fallback
+            path = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+            if path.exists():
+                cgroup_current = int(path.read_text().strip())
+    except (OSError, ValueError):
+        pass
+
+    try:
+        path = Path("/sys/fs/cgroup/memory.max")
+        if path.exists():
+            value = path.read_text().strip()
+            if value != "max":
+                cgroup_limit = int(value)
+        else:
+            # cgroup v1 fallback
+            path = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+            if path.exists():
+                cgroup_limit = int(path.read_text().strip())
+
+        # Some cgroup-v1 systems encode "unlimited" as a huge integer.
+        if cgroup_limit is not None and cgroup_limit >= (1 << 60):
+            cgroup_limit = None
+    except (OSError, ValueError):
+        pass
+
+    parts = [f"[MEM] {message}"]
+    if rss_bytes is not None:
+        parts.append(f"process RSS={_to_gib(rss_bytes):.2f} GiB")
+    if hwm_bytes is not None:
+        parts.append(f"process peak={_to_gib(hwm_bytes):.2f} GiB")
+    if cgroup_current is not None:
+        parts.append(f"cgroup current={_to_gib(cgroup_current):.2f} GiB")
+    if cgroup_limit is not None:
+        parts.append(f"cgroup limit={_to_gib(cgroup_limit):.2f} GiB")
+        if cgroup_current is not None and cgroup_limit > 0:
+            parts.append(f"cgroup usage={100.0 * cgroup_current / cgroup_limit:.1f}%")
+
+    logging.info(" | ".join(parts))
+
+
+def _release_memory_to_os() -> None:
+    """Release Python garbage and return releasable glibc heap pages on Linux.
+
+    The call is best-effort and has no effect on the numerical workflow.  It is
+    particularly useful after destroying large pyOpenMS/native objects between
+    sequential raw-file processing steps.
+    """
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _validate_float_dtype(dtype):
+    dtype = np.dtype(dtype)
+    if dtype.kind != "f":
+        raise TypeError("dtype must be a floating-point dtype.")
+    return dtype
+
 def _align_frame_from_file(
     file_path: str,
     mz_list,
     ppm_tol: int = 10,
-    dtype=np.float64
+    dtype=np.float32,
+    log_memory: bool = True,
+    out=None,
 ):
+    """Align one raw file, optionally directly into a caller-owned buffer.
+
+    When ``out`` is provided, ``align_frame`` writes directly into that array.
+    Only frame indices and retention-time metadata are returned, so the caller
+    does not retain a second file-sized aligned matrix.
+    """
+    dtype = _validate_float_dtype(dtype)
     exp, file_meta = load_single_file(file_path, format="auto")
+    if log_memory:
+        _log_memory_usage(f"After loading {Path(file_path).name} for alignment")
     logging.info(f"Aligning frames from MS file {file_path}...")
-    data, peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
-    return {
+    data, peak_meta = align_frame(
+        exp, mz_list, ppm_tol, dtype=dtype, out=out
+    )
+    if log_memory:
+        stage = "directly into global matrix" if out is not None else "into local matrix"
+        _log_memory_usage(f"After aligning {Path(file_path).name} {stage}")
+
+    # The DataFrame returned by align_frame is only a lightweight wrapper around
+    # ``out`` in direct-write mode. Keep only its frame index before releasing it.
+    data_index = np.asarray(data.index).copy()
+    if out is not None:
+        del data
+
+    # Explicitly release the native OpenMS experiment before returning metadata.
+    del exp
+    gc.collect()
+    if log_memory:
+        _log_memory_usage(f"After releasing raw experiment {Path(file_path).name}")
+
+    result = {
         "file_meta": file_meta,
-        "data": data,
+        "data_index": data_index,
         "peak_meta": peak_meta,
     }
+    if out is None:
+        result["data"] = data
+    return result
 
 class CyESIData:
     def __init__(self, result_dir:str):
@@ -77,26 +204,51 @@ class CyESIData:
     @classmethod
     def load_from_file(cls, file_path:str,
                     ref_mz: Optional[float] = None, 
-                    dtype = np.float64,
+                    dtype = np.float32,
                     ppm_tol: int = 10,
                     resolution: float = 35000,
                     resample_points_per_fwhm: float = 5.0,
                     ms_peak_snr_threshold: float = 10.0,
                     prominence_ratio: float = None,
                     distance:int = 3,
+                    log_memory: bool = True,
                     **preprocess_kwds):
+        dtype = _validate_float_dtype(dtype)
         obj = object.__new__(cls)
         exp, obj.file_meta = load_single_file(file_path, format='auto')
-        sum_ = sum_spec(exp, resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
+        if log_memory:
+            _log_memory_usage(f"After loading {Path(file_path).name}")
+
+        sum_ = sum_spec(
+            exp,
+            resolution_200=resolution,
+            points_per_fwhm=resample_points_per_fwhm,
+            intensity_dtype=dtype,
+        )
+        if log_memory:
+            _log_memory_usage(f"After summing {Path(file_path).name}")
         obj.file_meta["ref_mz"] = ref_mz
         
-        sum_ = filter_spectrum(sum_, snr_threshold=ms_peak_snr_threshold)
+        sum_ = filter_spectrum(sum_, snr_threshold=ms_peak_snr_threshold, dtype=dtype)
         mz_list, _ = extract_peaks(sum_, dtype=dtype, prominence_ratio=prominence_ratio, distance=distance)
         obj.data, obj.peak_meta = align_frame(exp, mz_list, ppm_tol, dtype=dtype)
+        if log_memory:
+            _log_memory_usage(f"After aligning {Path(file_path).name}")
+
+        # Raw spectra and the summed spectrum are no longer needed during cell
+        # extraction; releasing them here lowers the preprocessing peak RSS.
+        del exp, sum_
+        gc.collect()
+        if log_memory:
+            _log_memory_usage(f"After releasing raw MS objects {Path(file_path).name}")
+
         obj.peak_meta["time"] = obj.peak_meta["rt"] / np.max(obj.peak_meta["rt"])
         obj.peak_meta["label"] = [obj.file_meta["name"].split(".")[0]] * len(obj.peak_meta)
         obj.ref_mz = ref_mz
+        preprocess_kwds.setdefault("dtype", dtype)
         obj.preprocess(**preprocess_kwds)
+        if log_memory:
+            _log_memory_usage(f"After cell peak extraction {Path(file_path).name}")
         obj.feature_meta = pd.DataFrame({
             "mz": obj.data.columns.astype(float)
         })
@@ -105,106 +257,420 @@ class CyESIData:
     @classmethod
     def load_from_filelist(cls, dir_path:str,
                     ref_mz: Optional[float] = None,
-                    dtype = np.float64,
+                    dtype = np.float32,
                     ppm_tol: int = 10,
                     resolution: float = 35000,
                     resample_points_per_fwhm: float = 5.0,
                     ms_peak_snr_threshold: float = 10.0,
                     prominence_ratio: float = None,
-                    n_jobs:int = -1,
+                    n_jobs:int = 1,
                     distance:int = 3,
+                    show_progress: bool = True,
+                    log_memory: bool = True,
                     **preprocess_kwds):
-        files = os.listdir(dir_path)
-        filelist = []
-        for file in files:
-            full_path = os.path.join(dir_path, file)
-            if (not os.path.isdir(full_path)) and file.lower().endswith((".mzml", ".mzxml")):
-                filelist.append(full_path)
-        logging.info(f"Detected files in targeted directory: {filelist}")
-        logging.info(f"Summing MS Spectrometry, resolution={resolution}, resample points per FWHM={resample_points_per_fwhm}...")
-        _sum_specs = Parallel(n_jobs=n_jobs, prefer="threads")(
-            delayed(sum_spectrum_from_file)(f, resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
-            for f in filelist)
-        total_sum_spec = sum_spec(pack_specs(_sum_specs), resolution_200=resolution, points_per_fwhm=resample_points_per_fwhm)
-        
-        logging.info(f"Performing summed-MS denoising, snr_threshold={ms_peak_snr_threshold}...")
-        total_sum_spec = filter_spectrum(total_sum_spec, snr_threshold=ms_peak_snr_threshold)
-        logging.info(f"Performing summed-MS peak picking...")
-        mz_list, _ = extract_peaks(total_sum_spec, prominence_ratio=prominence_ratio, distance=distance)
-        align_results = Parallel(n_jobs=n_jobs)(
-            delayed(_align_frame_from_file)(
-                fp, mz_list, ppm_tol=ppm_tol, dtype=dtype
-            )
-            for fp in filelist
-        )
-        
-        logging.info(f"Building data container class...")
-        align_results = sorted(align_results,key=lambda x: x["file_meta"]["timestamp"])
-        obj = cls.__new__(cls)
-        obj.data = None
-        obj.peak_meta = None
-        timestamp_start = align_results[0]["file_meta"]["timestamp"]
-        timestamp_end = align_results[-1]["file_meta"]["timestamp"] + \
-            align_results[-1]["peak_meta"]["rt"].iloc[-1]
+        """Process multiple raw MS files with a memory-bounded batch architecture.
 
+        The mass-spectrometry workflow uses two sequential passes.  Pass 1 reads
+        one raw file at a time and builds the shared summed-spectrum feature axis.
+        Pass 2 again reads exactly one raw file at a time, aligns that file to the
+        shared axis, extracts cells locally, retains only the much smaller
+        cell-level result, and releases the raw/frame-level objects before opening
+        the next file.  Cell-level results are concatenated only after all files
+        have been processed.
+
+        This deliberately avoids the historical global ``all_frames x features``
+        matrix while preserving the existing CyESIData return type, plotting
+        modules, and downstream analysis API.
+
+        Acquisition timestamps are preserved across the batch.  Each detected
+        cell retains local ``rt`` plus ``acquisition_timestamp``, ``absolute_time``
+        (Unix seconds), globally normalized ``time``, ``label``, and
+        ``source_file``.
+
+        ``n_jobs`` is retained for API compatibility but raw-file processing is
+        intentionally sequential.  It is forwarded only to blockwise cell peak
+        extraction unless that routine is explicitly configured via
+        ``preprocess_kwds['n_jobs']``.
+        """
+        dtype = _validate_float_dtype(dtype)
+
+        files = []
+        for name in os.listdir(dir_path):
+            full_path = os.path.join(dir_path, name)
+            if (not os.path.isdir(full_path)) and name.lower().endswith((".mzml", ".mzxml")):
+                files.append(full_path)
+        files.sort()
+        if not files:
+            raise FileNotFoundError(f"No mzML/mzXML files found in {dir_path}")
+
+        logging.info(f"Detected files in targeted directory: {files}")
+        logging.info(
+            "Batch raw-MS workflow: shared feature-axis pass followed by "
+            "strictly sequential single-file alignment/cell extraction."
+        )
+        if n_jobs not in (None, 1):
+            logging.info(
+                "Raw-file alignment remains sequential for bounded memory; "
+                "n_jobs=%s is used only for cell peak extraction unless overridden.",
+                n_jobs,
+            )
+
+        # ------------------------------------------------------------------
+        # PASS 1: build a shared feature axis with one raw file in memory.
+        # ------------------------------------------------------------------
+        logging.info(
+            "Building shared summed spectrum, resolution=%s, "
+            "resample points per FWHM=%s...",
+            resolution,
+            resample_points_per_fwhm,
+        )
+        total_mz = None
+        total_intensity = None
+        file_records = []
+
+        for fp in tqdm(
+            files,
+            desc="Shared axis: summing files",
+            unit="file",
+            disable=not show_progress,
+        ):
+            exp, file_meta = load_single_file(fp, format="auto")
+            if log_memory:
+                _log_memory_usage(f"After loading {Path(fp).name} for shared-axis summing")
+
+            n_ms1 = 0
+            last_ms1_rt = 0.0
+            for spec in exp:
+                if spec.getMSLevel() == 1:
+                    n_ms1 += 1
+                    last_ms1_rt = float(spec.getRT())
+
+            summed = sum_spec(
+                exp,
+                resolution_200=resolution,
+                points_per_fwhm=resample_points_per_fwhm,
+                intensity_dtype=dtype,
+            )
+            mz_grid, summed_intensity = summed.get_peaks()
+            mz_grid = np.asarray(mz_grid, dtype=np.float64)
+            # Accumulation remains float64 so the shared feature axis is not
+            # changed by the low-memory storage dtype.
+            summed_intensity = np.asarray(summed_intensity, dtype=np.float64)
+
+            if total_mz is None:
+                total_mz = mz_grid.copy()
+                total_intensity = summed_intensity.copy()
+            else:
+                if total_mz.shape != mz_grid.shape or not np.array_equal(total_mz, mz_grid):
+                    summed_intensity = np.interp(
+                        total_mz, mz_grid, summed_intensity, left=0.0, right=0.0
+                    )
+                total_intensity += summed_intensity
+
+            file_records.append({
+                "path": fp,
+                "file_meta": dict(file_meta),
+                "n_frames": int(n_ms1),
+                "last_rt": float(last_ms1_rt),
+            })
+
+            del exp, summed, mz_grid, summed_intensity
+            _release_memory_to_os()
+            if log_memory:
+                _log_memory_usage(f"After summing and releasing {Path(fp).name}")
+
+        total_sum_spec = oms.MSSpectrum()
+        total_sum_spec.setMSLevel(1)
+        total_sum_spec.setRT(0.0)
+        total_sum_spec.set_peaks((
+            total_mz.astype(np.float64, copy=False),
+            total_intensity.astype(dtype, copy=False),
+        ))
+
+        logging.info(
+            "Performing shared summed-MS denoising, snr_threshold=%s...",
+            ms_peak_snr_threshold,
+        )
+        total_sum_spec = filter_spectrum(
+            total_sum_spec,
+            snr_threshold=ms_peak_snr_threshold,
+            dtype=dtype,
+        )
+        logging.info("Performing shared summed-MS peak picking...")
+        mz_list, _ = extract_peaks(
+            total_sum_spec,
+            dtype=dtype,
+            mz_dtype=np.float64,
+            prominence_ratio=prominence_ratio,
+            distance=distance,
+            resolution_200=resolution,
+        )
+        mz_list = np.asarray(mz_list, dtype=np.float64)
+        if mz_list.size == 0:
+            raise ValueError("No peaks were detected from the shared summed spectrum.")
+
+        logging.info("Shared feature axis contains %d m/z features.", mz_list.size)
+        if log_memory:
+            _log_memory_usage("After shared summed-spectrum peak picking")
+
+        del total_sum_spec, total_mz, total_intensity
+        _release_memory_to_os()
+
+        # ------------------------------------------------------------------
+        # Preserve the v3 acquisition-timestamp logic across independent files.
+        # ------------------------------------------------------------------
+        file_records.sort(key=lambda x: x["file_meta"]["timestamp"])
+        timestamp_start = float(file_records[0]["file_meta"]["timestamp"])
+        timestamp_end = max(
+            float(record["file_meta"]["timestamp"]) + float(record["last_rt"])
+            for record in file_records
+        )
+        time_span = timestamp_end - timestamp_start
+        if not np.isfinite(time_span) or time_span <= 0:
+            time_span = 1.0
+
+        # ``find_cell_peaks`` can still parallelize small cell/window operations,
+        # but the expensive raw-file load/alignment itself always remains serial.
+        local_preprocess_kwds = dict(preprocess_kwds)
+        local_preprocess_kwds.setdefault("dtype", dtype)
+        local_preprocess_kwds.setdefault("show_progress", show_progress)
+        if n_jobs not in (None, 1):
+            local_preprocess_kwds.setdefault("n_jobs", n_jobs)
+
+        cell_data_parts = []
+        cell_meta_parts = []
         per_file_meta = []
 
-        for r in align_results:
-            data = r["data"]
-            peak_meta = r["peak_meta"]
-            file_meta = dict(r["file_meta"])
+        # ------------------------------------------------------------------
+        # PASS 2: one raw file -> local frames -> local cells -> release.
+        # ------------------------------------------------------------------
+        iterator = tqdm(
+            file_records,
+            desc="Processing raw files",
+            unit="file",
+            disable=not show_progress,
+        )
+        for record in iterator:
+            fp = record["path"]
+            file_name = Path(fp).name
+            file_meta = dict(record["file_meta"])
 
-            if isinstance(data, pd.DataFrame):
-                data = data.copy()
-                peak_meta["time"] = (peak_meta["rt"] + file_meta["timestamp"] - timestamp_start
-                                     ) / (timestamp_end - timestamp_start)
-                peak_meta["label"] = [file_meta["name"].split(".")[0]] * len(peak_meta)
-                if obj.data is None:
-                    obj.data = data
-                else:
-                    obj.data = pd.concat([obj.data, data], axis=0)
+            exp, loaded_meta = load_single_file(fp, format="auto")
+            # Use metadata from the actual second-pass load while preserving the
+            # timestamp/order established in pass 1.
+            file_meta.update(loaded_meta)
+            if log_memory:
+                _log_memory_usage(f"After loading {file_name} for local alignment")
 
-            if isinstance(peak_meta, pd.DataFrame):
-                peak_meta = peak_meta.copy()
+            logging.info("Aligning frames from MS file %s to shared feature axis...", fp)
+            frame_data, frame_meta = align_frame(
+                exp,
+                mz_list,
+                ppm_tol,
+                dtype=dtype,
+                mz_dtype=np.float64,
+                prominence_ratio=prominence_ratio,
+                distance=distance,
+                resolution_200=resolution,
+            )
+            if log_memory:
+                _log_memory_usage(f"After local alignment {file_name}")
 
-                if obj.peak_meta is None:
-                    obj.peak_meta = peak_meta
-                else:
-                    obj.peak_meta = pd.concat([obj.peak_meta, peak_meta], axis=0)
+            # Timestamp fields are created at frame level so local cell extraction
+            # automatically carries the correct values to each detected peak frame.
+            acquisition_timestamp = float(file_meta["timestamp"])
+            frame_meta = frame_meta.copy()
+            frame_meta["acquisition_timestamp"] = acquisition_timestamp
+            frame_meta["absolute_time"] = acquisition_timestamp + frame_meta["rt"].to_numpy(dtype=np.float64)
+            frame_meta["time"] = (
+                frame_meta["absolute_time"] - timestamp_start
+            ) / time_span
+            label = file_meta["name"].split(".")[0]
+            frame_meta["label"] = label
+            frame_meta["source_file"] = label
 
+            # Raw spectra are no longer needed.  Release the native object before
+            # running the blockwise cell extraction on the local frame matrix.
+            del exp
+            _release_memory_to_os()
+            if log_memory:
+                _log_memory_usage(f"After releasing raw experiment {file_name}")
+
+            local_obj = object.__new__(cls)
+            local_obj.data = frame_data
+            local_obj.peak_meta = frame_meta
+            local_obj.file_meta = file_meta
+            local_obj.file_meta["ref_mz"] = ref_mz
+            local_obj.ref_mz = ref_mz
+
+            logging.info("Extracting cells from %s before opening the next raw file...", file_name)
+            local_obj.preprocess(**local_preprocess_kwds)
+            if log_memory:
+                _log_memory_usage(f"After local cell extraction {file_name}")
+
+            # Keep only cell-level objects.  Prefixing the temporary index prevents
+            # collisions; a compact global cell index is assigned after concat.
+            local_cells = local_obj.data.copy(deep=False)
+            local_meta = local_obj.peak_meta.copy(deep=False)
+            local_index = pd.Index(
+                [f"{label}__cell_{i:07d}" for i in range(len(local_cells))],
+                name="cell_id",
+            )
+            local_cells.index = local_index
+            local_meta.index = local_index
+            cell_data_parts.append(local_cells)
+            cell_meta_parts.append(local_meta)
+
+            file_meta["n_cells"] = int(len(local_cells))
+            file_meta["n_frames"] = int(record["n_frames"])
+            file_meta["last_rt"] = float(record["last_rt"])
             per_file_meta.append(file_meta)
 
+            # Drop the local frame-level matrix before processing the next file.
+            del frame_data, frame_meta, local_obj, local_cells, local_meta
+            _release_memory_to_os()
+            if log_memory:
+                _log_memory_usage(f"After releasing local frame matrix {file_name}")
+
+        # ------------------------------------------------------------------
+        # Cell-level concat.  Local feature filtering may have removed different
+        # shared-axis columns, so outer-concat and zero-fill reproduce the batch
+        # architecture without ever concatenating raw frames.
+        # ------------------------------------------------------------------
+        logging.info("Concatenating %d processed files at cell level...", len(cell_data_parts))
+        if cell_data_parts:
+            combined_data = pd.concat(
+                cell_data_parts,
+                axis=0,
+                join="outer",
+                sort=False,
+                copy=False,
+            ).fillna(0)
+            # Columns originate from the same shared feature axis.  Restore that
+            # axis order for all features that survived at least one local filter.
+            present = set(combined_data.columns)
+            ordered_cols = [mz for mz in mz_list if mz in present]
+            combined_data = combined_data.loc[:, ordered_cols]
+            combined_data = combined_data.astype(dtype, copy=False)
+            combined_meta = pd.concat(cell_meta_parts, axis=0, copy=False)
+        else:
+            combined_data = pd.DataFrame(dtype=dtype)
+            combined_meta = pd.DataFrame()
+
+        # Compact, deterministic global cell ids while retaining source_file/label.
+        global_index = pd.Index(
+            [f"cell_{i:08d}" for i in range(len(combined_data))],
+            name="cell_id",
+        )
+        combined_data.index = global_index
+        combined_meta.index = global_index
+
+        obj = object.__new__(cls)
+        obj.data = combined_data
+        obj.peak_meta = combined_meta
         obj.file_meta = {
             "name": os.path.basename(os.path.normpath(dir_path)),
             "ref_mz": ref_mz,
             "per_file_meta": per_file_meta,
+            "timestamp_start": timestamp_start,
+            "timestamp_end": timestamp_end,
+            "time_span": time_span,
+            "batch_processing": {
+                "architecture": "shared_axis_singlefile_cell_concat",
+                "n_files": int(len(file_records)),
+                "raw_file_parallelism": 1,
+                "shared_feature_count": int(mz_list.size),
+                "dtype": dtype.name,
+            },
         }
         obj.ref_mz = ref_mz
-        
-        logging.info(f"Performing denoising and cell peak picking...")
-        obj.preprocess(**preprocess_kwds)
         obj.feature_meta = pd.DataFrame({
             "mz": obj.data.columns.astype(float)
         })
+
+        del cell_data_parts, cell_meta_parts
+        _release_memory_to_os()
+        if log_memory:
+            _log_memory_usage("After final cell-level concatenation")
+
+        logging.info(
+            "Batch processing complete: %d cells x %d features from %d files.",
+            obj.data.shape[0],
+            obj.data.shape[1],
+            len(file_records),
+        )
         return obj
-        
+
     def preprocess(self, baseline_filter = median_filter, 
                          baseline_filter_size:int = 50,
                          cell_snr:float = 5.0,
                          peak_snr:float = 3.0,
                          max_zero_frac:float = 0.9,
+                         dtype=np.float32,
                          debug_hook: Optional[DebugHook] = None,
                          **kwargs):
+        dtype = _validate_float_dtype(dtype)
         
         def emit(stage: str, **payload):
             if debug_hook is not None:
                 debug_hook(stage, payload)
                 
-        data = find_cell_peaks(self.data, self.ref_mz, baseline_filter=baseline_filter, baseline_filter_size=baseline_filter_size, 
-                               cell_snr=cell_snr, peak_snr=peak_snr, max_zero_frac=max_zero_frac, **kwargs)
-        emit("find_cells", signal = self.data, baseline = data["baseline"], cell_idx = data["peak_frames"])
+        # The normal preprocessing path does not retain the full frame x feature
+        # baseline matrix.  A full baseline is only requested when a debug hook is
+        # present and may need it for visualization/inspection.
+        data = find_cell_peaks(
+            self.data,
+            self.ref_mz,
+            baseline_filter=baseline_filter,
+            baseline_filter_size=baseline_filter_size,
+            cell_snr=cell_snr,
+            peak_snr=peak_snr,
+            max_zero_frac=max_zero_frac,
+            dtype=dtype,
+            return_full_baseline=(debug_hook is not None),
+            **kwargs,
+        )
+        emit(
+            "find_cells",
+            time=self.peak_meta["time"],
+            signal=self.data,
+            baseline=data["baseline"],
+            cell_idx=data["peak_frames"],
+        )
+        # Compute reference m/z SNR for each detected cell (peak frame).
+        peak_frames = data.get("peak_frames", np.array([], dtype=int))
+        ref_baseline = data.get("ref_baseline", None)
+        ref_idx = data.get("ref_idx", None)
+        snr_values = []
+        eps = 1e-12
+        # Use original data matrix to get intensities at peak frames
+        X_orig = self.data.values
+        for pf in peak_frames:
+            try:
+                inten = float(X_orig[pf, ref_idx])
+            except Exception:
+                inten = float('nan')
+            try:
+                bval = float(ref_baseline[pf])
+            except Exception:
+                bval = 0.0
+            if bval is None or (isinstance(bval, float) and math.isnan(bval)):
+                bval = 0.0
+            if bval <= 0:
+                snr = float('nan') if math.isnan(inten) else (inten / eps)
+            else:
+                snr = inten / bval
+            snr_values.append(snr)
+
+        # Subset data and peak_meta to detected cells, then attach SNRs
         self.data, self.peak_meta = (data["cell_df"], 
             pd.DataFrame(self.peak_meta.iloc[data["peak_frames"], :], index=self.peak_meta.index[data["peak_frames"]]))
+        try:
+            # align snr_values order with the new peak_meta rows
+            self.peak_meta["ref_snr"] = snr_values
+        except Exception:
+            # fallback: ensure column exists even if empty
+            self.peak_meta["ref_snr"] = pd.Series(index=self.peak_meta.index, dtype=float)
         self.file_meta['length'] = self.data.shape[0]
         return self
             

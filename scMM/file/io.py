@@ -105,6 +105,7 @@ def sum_spec(
     ms_level: int = 1,
     normalize: bool = False,
     zero_outside: bool = True,
+    intensity_dtype=np.float32,
 ):
 
     mz_min, mz_max = map(float, mz_range)
@@ -153,9 +154,13 @@ def sum_spec(
     spec_out = oms.MSSpectrum()
     spec_out.setMSLevel(ms_level)
     spec_out.setRT(0.0)
+    intensity_dtype = np.dtype(intensity_dtype)
+    if intensity_dtype.kind != "f":
+        raise TypeError("intensity_dtype must be a floating-point dtype.")
+
     spec_out.set_peaks((
-        mz_grid.astype(np.float64),
-        out_intensity.astype(np.float32)
+        mz_grid.astype(np.float64, copy=False),
+        out_intensity.astype(intensity_dtype, copy=False)
     ))
 
     spec_out.setMetaValue("n_summed_spectra", int(total_spectra))
@@ -174,6 +179,7 @@ def sum_spectrum_from_file(
         ms_level: int = 1,
         resolution_200: float = 35000.0,
         points_per_fwhm: float = 5.0,
+        intensity_dtype=np.float32,
     ) -> tuple[oms.MSSpectrum, int]:
     exp = oms.MSExperiment()
     oms.MzMLFile().load(path, exp)
@@ -181,12 +187,14 @@ def sum_spectrum_from_file(
         exp,
         ms_level=ms_level,
         resolution_200=resolution_200,
-        points_per_fwhm=points_per_fwhm
+        points_per_fwhm=points_per_fwhm,
+        intensity_dtype=intensity_dtype,
     )
 
 def extract_peaks(
     spec: oms.MSSpectrum,
-    dtype=np.float64,
+    dtype=np.float32,
+    mz_dtype=np.float64,
     prominence_ratio: float = None,
     distance: int = 3,
     method: str = "centroid",    
@@ -195,11 +203,22 @@ def extract_peaks(
     centroid_intensity_mode: str = "apex" 
 ) -> Tuple[np.ndarray, np.ndarray]:
 
-    mz = np.asarray(spec.get_peaks()[0], dtype=dtype)
-    intensity = np.asarray(spec.get_peaks()[1], dtype=dtype)
+    # m/z values remain float64 by default because centroid locations and ppm
+    # matching are precision-sensitive.  ``dtype`` controls intensity storage and
+    # defaults to float32, which is the large-memory path in raw-MS processing.
+    intensity_dtype = np.dtype(dtype)
+    mz_dtype = np.dtype(mz_dtype)
+    if intensity_dtype.kind != "f" or mz_dtype.kind != "f":
+        raise TypeError("dtype and mz_dtype must be floating-point dtypes.")
+
+    mz = np.asarray(spec.get_peaks()[0], dtype=mz_dtype)
+    # Peak localization/centroiding is kept in float64 to preserve the previous
+    # numerical behavior near ppm-matching boundaries.  Only the returned peak
+    # intensity vector is down-cast to the configurable storage dtype.
+    intensity = np.asarray(spec.get_peaks()[1], dtype=np.float64)
 
     if mz.size == 0:
-        return np.array([], dtype=dtype), np.array([], dtype=dtype)
+        return np.array([], dtype=mz_dtype), np.array([], dtype=intensity_dtype)
 
     # Ensure sorted
     if mz.size > 1 and np.any(np.diff(mz) < 0):
@@ -210,7 +229,7 @@ def extract_peaks(
     prom = None
     if prominence_ratio is not None:
         if intensity.size == 0 or np.max(intensity) <= 0:
-            return np.array([], dtype=dtype), np.array([], dtype=dtype)
+            return np.array([], dtype=mz_dtype), np.array([], dtype=intensity_dtype)
         prom = np.max(intensity) * prominence_ratio
 
     peak_idx, _ = find_peaks(
@@ -220,7 +239,7 @@ def extract_peaks(
     )
 
     if peak_idx.size == 0:
-        return np.array([], dtype=dtype), np.array([], dtype=dtype)
+        return np.array([], dtype=mz_dtype), np.array([], dtype=intensity_dtype)
 
     peak_mz_out = []
     peak_int_out = []
@@ -323,7 +342,10 @@ def extract_peaks(
         else:
             raise ValueError("method must be 'centroid' or 'parabola'")
 
-    return np.asarray(peak_mz_out, dtype=dtype), np.asarray(peak_int_out, dtype=dtype)
+    return (
+        np.asarray(peak_mz_out, dtype=mz_dtype),
+        np.asarray(peak_int_out, dtype=intensity_dtype),
+    )
 
 def align_frame(
         exp: oms.MSExperiment,
@@ -331,18 +353,59 @@ def align_frame(
         ppm: float = 10.0,
         ms_level: int = 1,
         aggregate: str = "max",   # "sum" | "max"
-        dtype=np.float64,
+        dtype=np.float32,
+        mz_dtype=np.float64,
+        out=None,
         **kwargs
     ):
+    """Align MS1 frames to a target m/z list.
 
-    targets = np.asarray(mz_list, dtype=np.float64)
+    Parameters
+    ----------
+    exp : pyopenms.MSExperiment
+        Input experiment.
+    mz_list : array-like
+        Target m/z values. Their original order defines output columns.
+    ppm : float, default=10.0
+        Maximum nearest-target mass error in ppm.
+    ms_level : int, default=1
+        MS level to align.
+    aggregate : {"sum", "max"}, default="max"
+        Rule used when multiple extracted peaks map to the same target.
+    dtype : numpy dtype, default=np.float32
+        Intensity/output dtype.
+    mz_dtype : numpy dtype, default=np.float64
+        m/z computation dtype.
+    out : numpy.ndarray, optional
+        Writable preallocated array with shape ``(n_frames, n_targets)``.
+        When supplied, alignment is written directly into this buffer and no
+        separate frame x feature intensity matrix is allocated. The buffer is
+        zero-filled before alignment.
+
+    Returns
+    -------
+    data : pandas.DataFrame
+        View-like DataFrame wrapper around the aligned output array.
+    peak_meta : pandas.DataFrame
+        Retention-time metadata indexed by original frame id.
+
+    Notes
+    -----
+    Providing ``out`` changes only storage, not matching or aggregation logic.
+    The returned DataFrame preserves the historical API.
+    """
+
+    intensity_dtype = np.dtype(dtype)
+    mz_dtype = np.dtype(mz_dtype)
+    if intensity_dtype.kind != "f" or mz_dtype.kind != "f":
+        raise TypeError("dtype and mz_dtype must be floating-point dtypes.")
+
+    targets = np.asarray(mz_list, dtype=mz_dtype)
     if targets.ndim != 1 or targets.size == 0:
         raise ValueError("mz_list must be a non-empty 1D array-like.")
 
     order = np.argsort(targets)
     targets_sorted = targets[order]
-    inv_order = np.empty_like(order)
-    inv_order[order] = np.arange(order.size)
 
     n_targets = targets_sorted.size
 
@@ -361,13 +424,36 @@ def align_frame(
     if n_frames == 0:
         raise ValueError("No spectra found.")
 
-    X = np.zeros((n_frames, n_targets), dtype=np.float32)
+    if out is None:
+        X = np.zeros((n_frames, n_targets), dtype=intensity_dtype)
+    else:
+        if not isinstance(out, np.ndarray):
+            raise TypeError("out must be a writable numpy.ndarray or None.")
+        if out.shape != (n_frames, n_targets):
+            raise ValueError(
+                "out has incompatible shape: "
+                f"expected {(n_frames, n_targets)}, got {out.shape}."
+            )
+        if not out.flags.writeable:
+            raise ValueError("out must be writable.")
+        if np.dtype(out.dtype) != intensity_dtype:
+            raise TypeError(
+                "out dtype must match dtype exactly: "
+                f"expected {intensity_dtype.name}, got {out.dtype}."
+            )
+        X = out
+        # ``aligned_matrix`` is allocated with np.empty in the multi-file path.
+        # Zero the assigned row slice before sparse peak writes so unmatched
+        # frame-feature entries retain the same value as the historical
+        # np.zeros-based implementation.
+        X.fill(0)
 
     for row_idx, (frame_id, spec) in enumerate(spectra):
 
         mz, inten = extract_peaks(
             spec,
             dtype=dtype,
+            mz_dtype=mz_dtype,
             prominence_ratio=kwargs.get("prominence_ratio", None),
             distance=kwargs.get("distance", 3),
             method=kwargs.get("method", "centroid"),
@@ -379,8 +465,8 @@ def align_frame(
         if mz.size == 0:
             continue
 
-        mz = np.asarray(mz, dtype=np.float64)
-        inten = np.asarray(inten, dtype=np.float64)
+        mz = np.asarray(mz, dtype=mz_dtype)
+        inten = np.asarray(inten, dtype=intensity_dtype)
 
         if mz.size >= 2 and np.any(np.diff(mz) < 0):
             idx = np.argsort(mz)
@@ -415,8 +501,12 @@ def align_frame(
         if not np.any(matched):
             continue
 
-        tgt_idx = best_idx[matched]
-        tgt_int = inten[matched].astype(np.float32)
+        # ``best_idx`` indexes the sorted target array.  Map matched indices back
+        # to the original target-column order *before* writing.  This is
+        # mathematically equivalent to the previous final ``X[:, inv_order]``
+        # operation, but avoids allocating a second full frame x feature matrix.
+        tgt_idx = order[best_idx[matched]]
+        tgt_int = inten[matched].astype(intensity_dtype, copy=False)
 
         if aggregate == "sum":
             np.add.at(X[row_idx], tgt_idx, tgt_int)
@@ -432,8 +522,6 @@ def align_frame(
 
         else:
             raise ValueError("aggregate must be 'sum' or 'max'")
-
-    X = X[:, inv_order]
 
     df = pd.DataFrame(X, index=frame_ids, columns=targets)
     df.index.name = "frame"
