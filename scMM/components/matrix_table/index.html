@@ -1,0 +1,64 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+* {box-sizing:border-box} body {margin:0;font:13px Arial,sans-serif;color:#222}
+#viewport {height:520px;overflow:auto;position:relative;border:1px solid #ddd;contain:strict}
+#space {position:relative} #cells {position:absolute;inset:0;pointer-events:none}
+.cell {position:absolute;height:30px;width:130px;padding:6px 9px;border-right:1px solid #eee;border-bottom:1px solid #eee;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:white;text-align:right}
+.annotation {background:#eef5ff;font-weight:600} .header {background:#f4f6f8;font-weight:600}
+.obs {width:180px;background:#f7f7f7;text-align:left} .corner {width:180px;background:#e2edff;text-align:left;font-weight:600}
+#status {height:24px;padding:4px;color:#666;font-size:12px}
+</style></head><body><div id="viewport"><div id="space"></div><div id="cells"></div></div><div id="status"></div>
+<script>
+const viewport=document.getElementById('viewport'), space=document.getElementById('space'), cells=document.getElementById('cells'), status=document.getElementById('status');
+let data=null, pending='', timer=null;
+function send(type,values={}) {parent.postMessage({isStreamlitMessage:true,type,...values},'*');}
+function display(value) {return value===null||value===undefined?'':typeof value==='number'?Number(value.toPrecision(6)).toString():String(value);}
+function add(text,x,y,kind='',title='') {
+ const cell=document.createElement('div');cell.className='cell '+kind;cell.style.left=x+'px';cell.style.top=y+'px';cell.textContent=display(text);cell.title=title||display(text);cells.appendChild(cell);
+}
+function draw() {
+ if(!data)return;
+ const left=viewport.scrollLeft, top=viewport.scrollTop;
+ const firstRow=Math.floor(top/30),firstCol=Math.floor(left/130);
+ const lastRow=Math.min(data.nrows,firstRow+Math.ceil((viewport.clientHeight-60)/30)+2);
+ const lastCol=Math.min(data.ncols,firstCol+Math.ceil((viewport.clientWidth-180)/130)+2);
+ cells.replaceChildren();
+ for(let r=firstRow;r<lastRow;r++) {
+  const localRow=r-data.row;
+  for(let c=firstCol;c<lastCol;c++) {
+   const localCol=c-data.col;
+   if(localRow>=0&&localRow<data.values.length&&localCol>=0&&localCol<data.features.length)
+    add(data.values[localRow][localCol],180+c*130,60+r*30);
+  }
+ }
+ // Frozen obs cells are drawn after matrix cells; headers and corners stay on top.
+ for(let r=firstRow;r<lastRow;r++) {
+  const i=r-data.row;
+  add(i>=0&&i<data.observations.length?data.observations[i]:'…',left,60+r*30,'obs',data.cell_ids[i]||'');
+ }
+ for(let c=firstCol;c<lastCol;c++) {
+  const i=c-data.col;
+  add(data.annotations[i]??'…',180+c*130,top,'annotation');
+  add(data.features[i]??'…',180+c*130,top+30,'header');
+ }
+ add(data.var_label,left,top,'corner');add(data.obs_label,left,top+30,'corner');
+ const row=Math.floor(firstRow/50)*50,col=Math.floor(firstCol/10)*10;
+ const request=row+':'+col;
+ const available=row===data.row&&col===data.col;
+ status.textContent=`细胞 ${Math.min(firstRow+1,data.nrows)}–${Math.min(lastRow,data.nrows)} / ${data.nrows} · 特征 ${Math.min(firstCol+1,data.ncols)}–${Math.min(lastCol,data.ncols)} / ${data.ncols}`+(available?'':' · 加载中…');
+ clearTimeout(timer);
+ if(!available&&pending!==request)timer=setTimeout(()=>{pending=request;send('streamlit:setComponentValue',{value:{row,col},dataType:'json'});},100);
+}
+window.addEventListener('message',event=>{
+ if(event.data.type!=='streamlit:render')return;
+ const incoming=event.data.args;
+ if(data&&data.dataset!==incoming.dataset){viewport.scrollLeft=0;viewport.scrollTop=0;pending='';}
+ data=incoming;
+ space.style.width=(180+data.ncols*130)+'px';space.style.height=(60+data.nrows*30)+'px';
+ cells.style.width=space.style.width;cells.style.height=space.style.height;
+ if(pending===data.row+':'+data.col)pending='';
+ draw();send('streamlit:setFrameHeight',{height:548});
+});
+viewport.addEventListener('scroll',draw);window.addEventListener('resize',draw);
+send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:548});
+</script></body></html>

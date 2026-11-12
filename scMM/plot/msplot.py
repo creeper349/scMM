@@ -26,6 +26,83 @@ def eic(ax: plt.Axes, data: pd.DataFrame, mz: float, ppm_tol: float = 5.0, time:
     ax.legend()
     return ax, (time.values if time is not None else data.index, eic_values)
 
+
+def tic(
+    ax: plt.Axes,
+    data: pd.DataFrame,
+    time: Optional[pd.Series] = None,
+) -> plt.Axes:
+    """Plot a total-ion chromatogram from an aligned frame matrix."""
+    values = data.sum(axis=1)
+    x = time.to_numpy() if time is not None else np.asarray(data.index)
+    ax.plot(x, values.to_numpy(), linewidth=1.2)
+    ax.set_xlabel("Time" if time is not None else "Scan index")
+    ax.set_ylabel("Total ion intensity")
+    ax.set_title("TIC")
+    return ax
+
+
+def plot_cell_detection(
+    data: pd.DataFrame,
+    reference_mz,
+    cell_mask,
+    *,
+    peak_frames=None,
+    time=None,
+    ppm_tol=5.0,
+    output_file=None,
+    ax=None,
+):
+    """Plot reference EICs and mark frames detected as cells."""
+    references = np.atleast_1d(reference_mz).astype(float)
+    cell_mask = np.asarray(cell_mask, dtype=bool)
+    if len(cell_mask) != len(data):
+        raise ValueError("cell_mask length must match the frame matrix")
+    x = np.asarray(time) if time is not None else np.asarray(data.index)
+    if len(x) != len(data):
+        raise ValueError("time length must match the frame matrix")
+
+    created = ax is None
+    if created:
+        fig, ax = plt.subplots(figsize=(10, 4))
+    else:
+        fig = ax.figure
+    mz_axis = data.columns.astype(float).to_numpy()
+    for value in references:
+        indices = np.flatnonzero(
+            np.abs((mz_axis - value) / value * 1e6) <= ppm_tol
+        )
+        if len(indices) == 0:
+            indices = np.asarray([int(np.abs(mz_axis - value).argmin())])
+        signal = data.iloc[:, indices].sum(axis=1).to_numpy()
+        line = ax.plot(x, signal, linewidth=1.2, label=f"m/z {value:g}")[0]
+        ax.scatter(
+            x[cell_mask],
+            signal[cell_mask],
+            s=8,
+            color=line.get_color(),
+            alpha=0.65,
+        )
+        if peak_frames is not None:
+            peaks = np.asarray(peak_frames, dtype=int)
+            ax.scatter(
+                x[peaks],
+                signal[peaks],
+                s=24,
+                marker="x",
+                color="black",
+            )
+    ax.set_xlabel("Time" if time is not None else "Scan index")
+    ax.set_ylabel("Intensity")
+    ax.set_title("Reference EIC cell detection")
+    ax.legend()
+    from .ticks import tidy_numeric_ticks
+    tidy_numeric_ticks(fig)
+    fig.tight_layout()
+    if output_file is not None:
+        fig.savefig(output_file, bbox_inches="tight")
+    return fig, ax
+
 def _plot_cells(ax: plt.Axes, cell_mask:np.ndarray, data: Tuple[np.ndarray, np.ndarray]) -> plt.Axes:
     t, eic_values = data
     t, eic_values = t[cell_mask], eic_values[cell_mask]
@@ -36,21 +113,31 @@ def _plot_cells(ax: plt.Axes, cell_mask:np.ndarray, data: Tuple[np.ndarray, np.n
 def plot_ms(ax: plt.Axes,
             data: pd.DataFrame,
             frame_range: Optional[Tuple[int, int]] = None) -> plt.Axes:
-    frame_range = data.index if frame_range is None else range(frame_range[0], frame_range[1])
-    mz_inten = data.loc[frame_range].values.sum(axis=0)
+    if frame_range is None:
+        selected = data
+        title = "MS Spectrum for all frames"
+    else:
+        start, stop = frame_range
+        selected = data.iloc[start:stop]
+        title = f"MS Spectrum for frames {start} to {stop - 1}"
+    mz_inten = selected.values.sum(axis=0)
     for mz, inten in zip(data.columns.astype(np.float64), mz_inten):
         ax.vlines(mz, 0, inten, colors='black')
     ax.set_xlabel("m/z")
     ax.set_ylabel("Intensity")
-    ax.set_title(f"MS Spectrum for frames {frame_range.start} to {frame_range.stop - 1}")
+    ax.set_title(title)
     return ax
 
 def plot_hook(stage, data):
     if stage == "find_cells":
-        fig, ax = plt.subplots(figsize=(10, 4))
-        plot_ms(ax, data["signal"], frame_range=(data["cell_idx"][0] - 50, data["cell_idx"][-1] + 50))
-        _plot_cells(ax, data["cell_mask"], (data["baseline"][data["cell_idx"]], data["signal"].iloc[data["cell_idx"], :].sum(axis=1)))
-        plt.savefig(f".tmp/{stage}.svg", bbox_inches="tight")
+        os.makedirs(".tmp", exist_ok=True)
+        fig, _ = plot_cell_detection(
+            data["signal"],
+            data["reference_mz"],
+            data["cell_mask"],
+            peak_frames=data["cell_idx"],
+            output_file=f".tmp/{stage}.svg",
+        )
         plt.close(fig)
             
 def save_hook(stage, data):
@@ -151,6 +238,8 @@ def plot_spectrum(
             )
 
     ax.margins(x=0.01)
+    from .ticks import tidy_numeric_ticks
+    tidy_numeric_ticks(fig)
 
     if save_path is not None:
         fig.savefig(save_path, bbox_inches="tight")

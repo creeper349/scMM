@@ -1,9 +1,7 @@
 import numpy as np
 import pandas as pd
 import pyopenms as oms
-from .denoise import peak_recon, r1_decomposition
-from scipy.ndimage import median_filter, label
-from joblib import Parallel, delayed
+from scipy.ndimage import median_filter, label, uniform_filter1d
 from tqdm.auto import tqdm
 
 def filter_spectrum(
@@ -122,211 +120,206 @@ def _filter(data:np.ndarray, size:int = 10, filter = median_filter, **filter_kwa
 
 def find_cell_peaks(
     data: pd.DataFrame,
-    ref_mz: float,
+    reference_mz,
+    *,
+    reference_mode: str = "union",
+    ppm_tolerance: float = 10.0,
     baseline_filter=median_filter,
-    baseline_filter_size: int = 15,
-    cell_snr: float = 5.0,
-    peak_snr: float = 3.0,
+    baseline_window: int = 51,
+    cell_signal_threshold: float = 5.0,
+    feature_snr_threshold: float = 3.0,
+    noise_window: int = 51,
+    max_zero_fraction: float = 0.9,
     dtype=np.float32,
-    baseline_stat="median",
-    max_zero_frac: float = 0.9,
     n_jobs: int = 1,
     feature_block_size: int = 256,
-    return_full_baseline: bool = True,
+    return_full_baseline: bool = False,
     show_progress: bool = True,
-    **kwargs,
+    progress_callback=None,
+    **filter_kwargs,
 ):
-    """Detect cell windows and extract per-cell feature maxima with bounded RAM.
+    """Extract cells using reference EICs and quantify features with true SNR.
 
-    The original cell/peak criteria are preserved.  The key memory optimization is
-    that baseline filtering is performed in independent feature blocks.  Because the
-    baseline filter is called with ``size=(baseline_filter_size, 1)``, each feature
-    is filtered only along the frame axis and blockwise evaluation is mathematically
-    equivalent to filtering the full frame-by-feature matrix at once.
-
-    Parameters added for memory control
-    -----------------------------------
-    feature_block_size:
-        Number of m/z features baseline-filtered at once.
-    return_full_baseline:
-        When False, do not retain an N x P baseline matrix.  ``ref_baseline`` is
-        always returned for reference-channel SNR calculations.
-    show_progress:
-        Display a tqdm progress bar over feature blocks.
+    Cell windows are detected from one or more reference EICs using a
+    signal-to-baseline ratio. reference_mode combines their masks by union or
+    intersection. Feature detection is deliberately different: local noise is
+    estimated from frames outside every detected cell, and a feature is retained
+    in a cell only when its baseline-corrected apex divided by that noise standard
+    deviation exceeds feature_snr_threshold.
     """
-    feature_block_size = int(feature_block_size)
-    if feature_block_size <= 0:
-        raise ValueError("feature_block_size must be a positive integer.")
-    if baseline_stat not in {"max", "mean", "median"}:
-        raise ValueError("baseline_stat must be one of: 'max', 'mean', 'median'")
-
-    # ``dtype`` controls the large frame x feature / cell x feature intensity
-    # arrays.  float32 is the default to halve RAM relative to float64.  When the
-    # input DataFrame already has the requested dtype this remains a zero-copy view.
+    del n_jobs
     output_dtype = np.dtype(dtype)
     if output_dtype.kind != "f":
-        raise TypeError("dtype must be a floating-point dtype.")
+        raise TypeError("dtype must be a floating-point dtype")
+    if reference_mode not in {"union", "intersection"}:
+        raise ValueError("reference_mode must be 'union' or 'intersection'")
+    if not np.isfinite(ppm_tolerance) or ppm_tolerance <= 0:
+        raise ValueError("ppm_tolerance must be a positive finite number")
+    if feature_block_size < 1 or baseline_window < 1 or noise_window < 2:
+        raise ValueError("window and block sizes must be positive")
+    if not 0 <= max_zero_fraction <= 1:
+        raise ValueError("max_zero_fraction must be between 0 and 1")
+
+    references = np.atleast_1d(reference_mz).astype(np.float64)
+    if (
+        references.size == 0
+        or not np.all(np.isfinite(references))
+        or np.any(references <= 0)
+    ):
+        raise ValueError("reference_mz must contain at least one positive finite value")
+
     X = data.to_numpy(dtype=output_dtype, copy=False)
-
     mz_values = np.asarray(data.columns, dtype=np.float64)
-    ref_idx = int(np.abs(mz_values - ref_mz).argmin())
+    reference_indices = np.asarray(
+        [int(np.abs(mz_values - value).argmin()) for value in references],
+        dtype=np.int64,
+    )
+    matched_reference_mz = mz_values[reference_indices]
+    ppm_errors = (
+        np.abs(matched_reference_mz - references)
+        / np.abs(references)
+        * 1e6
+    )
+    missing = ppm_errors > float(ppm_tolerance)
+    if np.any(missing):
+        details = ", ".join(
+            f"{requested:g} (nearest {matched:g}, {error:.3f} ppm)"
+            for requested, matched, error in zip(
+                references[missing],
+                matched_reference_mz[missing],
+                ppm_errors[missing],
+            )
+        )
+        raise ValueError(
+            "Reference m/z feature was not detected within "
+            f"{float(ppm_tolerance):g} ppm: {details}"
+        )
 
-    # Cell detection requires only the reference feature baseline.  Computing this
-    # one column first avoids materializing the full baseline matrix before windows
-    # are known.
-    ref_signal = X[:, ref_idx]
-    ref_baseline = _filter(
-        X[:, ref_idx:ref_idx + 1],
-        size=baseline_filter_size,
+    reference_signal = X[:, reference_indices]
+    reference_baseline = _filter(
+        reference_signal,
+        size=baseline_window,
         filter=baseline_filter,
-        **kwargs,
-    )[:, 0]
-    cell_mask = ref_signal > cell_snr * ref_baseline
-    labeled_mask, n_cells = label(cell_mask.astype(np.int8))
+        **filter_kwargs,
+    )
+    eps = np.finfo(output_dtype).eps
+    reference_ratio = reference_signal / np.maximum(reference_baseline, eps)
+    reference_masks = reference_ratio > float(cell_signal_threshold)
+    cell_mask = (
+        np.any(reference_masks, axis=1)
+        if reference_mode == "union"
+        else np.all(reference_masks, axis=1)
+    )
 
-    # In a 1-D connected-component mask each label corresponds to one contiguous
-    # slice.  Using slices avoids repeated np.where scans and avoids copying X_win.
+    labeled_mask, n_cells = label(cell_mask.astype(np.int8))
     padded = np.concatenate(([False], cell_mask, [False]))
     transitions = np.diff(padded.astype(np.int8))
     starts = np.flatnonzero(transitions == 1)
     stops = np.flatnonzero(transitions == -1)
-    window_slices = [slice(int(s), int(e)) for s, e in zip(starts, stops)]
-
+    window_slices = [slice(int(start), int(stop)) for start, stop in zip(starts, stops)]
     if len(window_slices) != n_cells:
-        raise RuntimeError(
-            f"Internal cell-window mismatch: label() found {n_cells}, "
-            f"but {len(window_slices)} contiguous windows were identified."
-        )
+        raise RuntimeError("cell-window labeling produced inconsistent results")
 
-    peak_frames = np.empty(n_cells, dtype=np.int64)
-    window_ranges = []
-    for i, slc in enumerate(window_slices):
-        local_ref = ref_signal[slc]
-        peak_frames[i] = slc.start + int(np.argmax(local_ref))
-        window_ranges.append((slc.start, slc.stop - 1))
+    reference_score = np.mean(reference_ratio, axis=1)
+    peak_frames = np.asarray(
+        [slc.start + int(np.argmax(reference_score[slc])) for slc in window_slices],
+        dtype=np.int64,
+    )
+    window_ranges = [(slc.start, slc.stop - 1) for slc in window_slices]
 
     _, n_features = X.shape
-
-    # In the normal low-memory preprocessing path there is nothing else to compute
-    # when no cells are detected; the reference baseline is already available.
-    if n_cells == 0 and not return_full_baseline:
-        empty_df = pd.DataFrame(columns=data.columns, dtype=X.dtype)
-        return {
-            "cell_df": empty_df,
-            "cell_mask": cell_mask,
-            "labeled_mask": labeled_mask,
-            "baseline": None,
-            "ref_baseline": ref_baseline,
-            "ref_idx": ref_idx,
-            "ref_mz_matched": data.columns[ref_idx],
-            "peak_frames": peak_frames,
-            "window_ranges": window_ranges,
-            "zero_frac": pd.Series(index=data.columns, data=np.nan),
-            "kept_columns": pd.Series(index=data.columns, data=False),
-        }
-
     baseline_full = np.empty_like(X) if return_full_baseline else None
-    cell_matrix = (
-        np.empty((n_cells, n_features), dtype=X.dtype)
-        if n_cells > 0
-        else None
-    )
-    zero_counts = np.empty(n_features, dtype=np.int64) if n_cells > 0 else None
+    cell_matrix = np.zeros((n_cells, n_features), dtype=output_dtype)
+    feature_snr = np.zeros((n_cells, n_features), dtype=output_dtype)
+    non_cell = (~cell_mask).astype(np.float64)[:, None]
 
-    block_starts = range(0, n_features, feature_block_size)
     progress = tqdm(
-        block_starts,
+        range(0, n_features, feature_block_size),
         total=(n_features + feature_block_size - 1) // feature_block_size,
-        desc="Cell peak extraction",
+        desc="Cell feature extraction",
         unit="block",
         disable=not show_progress,
     )
-
-    for col_start in progress:
-        col_stop = min(col_start + int(feature_block_size), n_features)
+    total_blocks = max(1, (n_features + feature_block_size - 1) // feature_block_size)
+    for block_index, col_start in enumerate(progress):
+        col_stop = min(col_start + feature_block_size, n_features)
         X_block = X[:, col_start:col_stop]
-        B_block = _filter(
+        baseline = _filter(
             X_block,
-            size=baseline_filter_size,
+            size=baseline_window,
             filter=baseline_filter,
-            **kwargs,
+            **filter_kwargs,
         )
-
+        residual = X_block - baseline
         if baseline_full is not None:
-            baseline_full[:, col_start:col_stop] = B_block
+            baseline_full[:, col_start:col_stop] = baseline
 
-        if n_cells == 0:
-            del B_block
-            continue
-
-        def _process_one_window(cell_i):
-            slc = window_slices[cell_i]
-            X_win = X_block[slc, :]
-            B_win = B_block[slc, :]
-
-            feat_max = X_win.max(axis=0)
-            if baseline_stat == "max":
-                feat_baseline = B_win.max(axis=0)
-            elif baseline_stat == "mean":
-                feat_baseline = B_win.mean(axis=0)
-            else:  # median
-                feat_baseline = np.median(B_win, axis=0)
-
-            valid = feat_max > peak_snr * feat_baseline
-            return cell_i, np.where(valid, feat_max, 0).astype(X.dtype, copy=False)
-
-        if n_jobs in (None, 1):
-            block_results = (_process_one_window(i) for i in range(n_cells))
-            for cell_i, feat_out in block_results:
-                cell_matrix[cell_i, col_start:col_stop] = feat_out
-        else:
-            # Threads share X/B_block and therefore avoid process-level copies of the
-            # large intensity matrix.  Results are only one feature block per cell.
-            block_results = Parallel(
-                n_jobs=n_jobs,
-                prefer="threads",
-                batch_size=1,
-            )(delayed(_process_one_window)(i) for i in range(n_cells))
-            for cell_i, feat_out in block_results:
-                cell_matrix[cell_i, col_start:col_stop] = feat_out
-            del block_results
-
-        # Count zeros per block so we never materialize a full n_cells x n_features
-        # boolean matrix solely for feature filtering.
-        zero_counts[col_start:col_stop] = np.count_nonzero(
-            cell_matrix[:, col_start:col_stop] == 0, axis=0
+        count = uniform_filter1d(
+            non_cell, size=noise_window, axis=0, mode="constant", cval=0.0
+        ) * noise_window
+        sum_ = uniform_filter1d(
+            residual * non_cell,
+            size=noise_window,
+            axis=0,
+            mode="constant",
+            cval=0.0,
+        ) * noise_window
+        sum_sq = uniform_filter1d(
+            residual * residual * non_cell,
+            size=noise_window,
+            axis=0,
+            mode="constant",
+            cval=0.0,
+        ) * noise_window
+        mean = np.divide(sum_, count, out=np.zeros_like(sum_), where=count > 0)
+        variance = (
+            np.divide(sum_sq, count, out=np.zeros_like(sum_sq), where=count > 1)
+            - mean * mean
         )
-        del B_block
+        noise = np.sqrt(np.maximum(variance, 0.0))
 
-    if n_cells == 0:
-        empty_df = pd.DataFrame(columns=data.columns, dtype=X.dtype)
-        return {
-            "cell_df": empty_df,
-            "cell_mask": cell_mask,
-            "labeled_mask": labeled_mask,
-            "baseline": baseline_full,
-            "ref_baseline": ref_baseline,
-            "ref_idx": ref_idx,
-            "ref_mz_matched": data.columns[ref_idx],
-            "peak_frames": peak_frames,
-            "window_ranges": window_ranges,
-            "zero_frac": pd.Series(index=data.columns, data=np.nan),
-            "kept_columns": pd.Series(index=data.columns, data=False),
-        }
+        background = residual[~cell_mask]
+        if background.shape[0] > 1:
+            global_noise = np.nanstd(background, axis=0, ddof=1)
+        else:
+            global_noise = np.nanstd(residual, axis=0)
+        global_noise = np.maximum(global_noise, eps)
+        noise = np.where(
+            (count > 1) & (noise > eps), noise, global_noise[None, :]
+        )
 
-    # Zero counts were accumulated blockwise above, avoiding an additional full
-    # boolean matrix or DataFrame.
-    zero_frac_values = zero_counts.astype(np.float64) / float(n_cells)
-    keep_mask = zero_frac_values <= max_zero_frac
-    zero_frac = pd.Series(zero_frac_values, index=data.columns)
-    keep_cols = pd.Series(keep_mask, index=data.columns)
+        for cell_i, slc in enumerate(window_slices):
+            corrected_window = residual[slc]
+            apex_local = np.argmax(corrected_window, axis=0)
+            feature_index = np.arange(col_stop - col_start)
+            corrected_apex = np.maximum(
+                corrected_window[apex_local, feature_index], 0.0
+            )
+            absolute_apex = slc.start + apex_local
+            local_noise = noise[absolute_apex, feature_index]
+            snr = corrected_apex / np.maximum(local_noise, eps)
+            detected = snr >= float(feature_snr_threshold)
+            cell_matrix[cell_i, col_start:col_stop] = np.where(
+                detected, corrected_apex, 0.0
+            ).astype(output_dtype, copy=False)
+            feature_snr[cell_i, col_start:col_stop] = snr.astype(
+                output_dtype, copy=False
+            )
+        if progress_callback is not None:
+            progress_callback(
+                (block_index + 1) / total_blocks,
+                f"特征提取 block {block_index + 1}/{total_blocks}",
+            )
 
-    kept_matrix = cell_matrix if np.all(keep_mask) else cell_matrix[:, keep_mask]
-    kept_columns = data.columns[keep_mask]
+    if n_cells:
+        zero_fraction_values = np.mean(cell_matrix == 0, axis=0)
+    else:
+        zero_fraction_values = np.ones(n_features, dtype=np.float64)
+    keep_mask = zero_fraction_values <= max_zero_fraction
     cell_df = pd.DataFrame(
-        kept_matrix,
-        index=np.arange(n_cells),
-        columns=kept_columns,
+        cell_matrix[:, keep_mask],
+        index=pd.RangeIndex(n_cells, name="cell"),
+        columns=data.columns[keep_mask],
         copy=False,
     )
 
@@ -335,11 +328,15 @@ def find_cell_peaks(
         "cell_mask": cell_mask,
         "labeled_mask": labeled_mask,
         "baseline": baseline_full,
-        "ref_baseline": ref_baseline,
-        "ref_idx": ref_idx,
-        "ref_mz_matched": data.columns[ref_idx],
+        "reference_baseline": reference_baseline,
+        "reference_signal": reference_signal,
+        "reference_ratio": reference_ratio,
+        "reference_indices": reference_indices,
+        "reference_mz_matched": matched_reference_mz,
+        "reference_ppm_error": ppm_errors,
         "peak_frames": peak_frames,
         "window_ranges": window_ranges,
-        "zero_frac": zero_frac,
-        "kept_columns": keep_cols,
+        "feature_snr": feature_snr[:, keep_mask],
+        "zero_fraction": pd.Series(zero_fraction_values, index=data.columns),
+        "kept_columns": pd.Series(keep_mask, index=data.columns),
     }

@@ -1,0 +1,25 @@
+name: scmm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - git
+  - openpyxl
+  - jupyterlab
+  - ipykernel
+  - pytest
+  - pip
+  - pip:
+      # PyPI wheels avoid Windows application-control failures seen with the
+      # Conda/MKL builds on managed workstations.
+      - numpy==2.2.6
+      - scipy==1.15.3
+      - scikit-learn==1.7.2
+      - igraph==1.0.0
+      - leidenalg==0.12.0
+      - imbalanced-learn>=0.13
+      - shap>=0.48
+      - streamlit>=1.40
+      - plotly>=5.24
+      - pyopenms
+      - -e .

@@ -1,34 +1,62 @@
 from typing import Literal, Tuple, Dict, Any
 from scipy.signal import find_peaks
-from joblib import Parallel, delayed
-from tqdm import tqdm
 from datetime import datetime
-from collections.abc import Sequence
 import pyopenms as oms
 import pandas as pd
 import numpy as np
 import os
 import logging
+from .thermo_raw import load_thermo_raw
 
 def load_single_file(
     path: str,
-    format: Literal['auto', 'mzML', 'mzXML'] = 'mzML'
+    format: Literal['auto', 'mzML', 'mzXML'] = 'mzML',
+    msconvert_path=None,
+    centroid_ms2=False,
 ) -> Tuple[oms.MSExperiment, Dict[str, Any]]:
-    
+    original_path = os.path.abspath(path)
+    source_file = os.path.basename(os.path.normpath(path))
     exp = oms.MSExperiment()
     if format == 'auto':
-        format = 'mzML' if path.lower().endswith('.mzml') else 'mzXML'
-    
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix == '.mzml':
+            format = 'mzML'
+        elif suffix == '.mzxml':
+            format = 'mzXML'
+        elif suffix == '.raw':
+            exp, raw_metadata = load_thermo_raw(path, centroid_ms2=True) if centroid_ms2 else load_thermo_raw(path)
+            metadata = {
+                "name": os.path.splitext(source_file)[0],
+                "source_file": source_file,
+                "path": original_path,
+                "converted_from_raw": False,
+                **raw_metadata,
+            }
+            logging.info(f"Loaded Thermo RAW file from: {original_path}")
+            return exp, metadata
+        else:
+            raise ValueError(f"Unsupported MS file format: {suffix or path}")
     if format == 'mzML':
         oms.MzMLFile().load(path, exp)
     elif format == 'mzXML':
         oms.MzXMLFile().load(path, exp)
 
-    metadata = {}
-    metadata["name"], _ = os.path.splitext(os.path.basename(path))
-    metadata["timestamp"] = datetime.strptime(exp.getDateTime().get(), "%Y-%m-%d %H:%M:%S").timestamp()
-    metadata["instrument"] = exp.getInstrument().getName()
-    logging.info(f"Loaded MS file from: {path}")
+    timestamp_text = exp.getDateTime().get()
+    try:
+        timestamp = datetime.strptime(
+            timestamp_text, "%Y-%m-%d %H:%M:%S"
+        ).timestamp()
+    except (TypeError, ValueError):
+        timestamp = float("nan")
+    metadata = {
+        "name": os.path.splitext(source_file)[0],
+        "source_file": source_file,
+        "path": original_path,
+        "timestamp": timestamp,
+        "instrument": exp.getInstrument().getName(),
+        "converted_from_raw": False,
+    }
+    logging.info(f"Loaded MS file from: {original_path}")
 
     return exp, metadata
 
@@ -147,7 +175,7 @@ def sum_spec(
         total_spectra += 1
 
     if total_spectra == 0:
-        raise ValueError("No spectra found.")
+        raise ValueError(f"No MS{int(ms_level)} spectra found.")
 
     out_intensity = acc / total_spectra if normalize else acc
 
@@ -173,23 +201,6 @@ def sum_spec(
     spec_out.setMetaValue("normalized", int(bool(normalize)))
 
     return spec_out
-
-def sum_spectrum_from_file(
-        path: str,
-        ms_level: int = 1,
-        resolution_200: float = 35000.0,
-        points_per_fwhm: float = 5.0,
-        intensity_dtype=np.float32,
-    ) -> tuple[oms.MSSpectrum, int]:
-    exp = oms.MSExperiment()
-    oms.MzMLFile().load(path, exp)
-    return sum_spec(
-        exp,
-        ms_level=ms_level,
-        resolution_200=resolution_200,
-        points_per_fwhm=points_per_fwhm,
-        intensity_dtype=intensity_dtype,
-    )
 
 def extract_peaks(
     spec: oms.MSSpectrum,
@@ -412,6 +423,7 @@ def align_frame(
     spectra = []
     rt_list = []
     frame_ids = []
+    native_ids = []
 
     for i, spec in enumerate(exp):
         if spec.getMSLevel() != ms_level:
@@ -419,10 +431,11 @@ def align_frame(
         spectra.append((i, spec))
         rt_list.append(spec.getRT())
         frame_ids.append(i)
+        native_ids.append(spec.getNativeID())
 
     n_frames = len(spectra)
     if n_frames == 0:
-        raise ValueError("No spectra found.")
+        raise ValueError(f"No MS{int(ms_level)} spectra found.")
 
     if out is None:
         X = np.zeros((n_frames, n_targets), dtype=intensity_dtype)
@@ -526,33 +539,13 @@ def align_frame(
     df = pd.DataFrame(X, index=frame_ids, columns=targets)
     df.index.name = "frame"
 
-    rt_df = pd.DataFrame({"rt": rt_list}, index=frame_ids)
+    rt_df = pd.DataFrame(
+        {
+            "rt": rt_list,
+            "ms_level": np.ones(n_frames, dtype=np.int8),
+            "native_id": native_ids,
+        },
+        index=frame_ids,
+    )
 
     return df, rt_df
-
-def pack_specs(
-        spec_list,
-        reset_rt=True,
-        rt_step=1.0
-    ):
-    exp = oms.MSExperiment()
-
-    for i, spec in enumerate(spec_list):
-        spec_copy = oms.MSSpectrum(spec)
-
-        if reset_rt:
-            spec_copy.setRT(i * rt_step)
-
-        exp.addSpectrum(spec_copy)
-
-    return exp
-
-def save_spectra(spectra, output_path: str):
-    exp = oms.MSExperiment()
-    if isinstance(spectra, oms.MSSpectrum):
-        exp.addSpectrum(spectra)
-    elif isinstance(spectra, Sequence) and not isinstance(spectra, (str, bytes)):
-        for i, spec in enumerate(spectra):
-            exp.addSpectrum(spec)
-
-    oms.MzMLFile().store(output_path, exp)

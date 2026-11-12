@@ -1,0 +1,55 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}body{margin:0;font:13px Arial,sans-serif;color:#222}
+#viewport{height:520px;overflow:auto;border:1px solid #ddd;position:relative;contain:strict}
+#space{position:relative}#cells{position:absolute;inset:0}
+.cell{position:absolute;height:34px;padding:6px;border-right:1px solid #ddd;border-bottom:1px solid #eee;background:white;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.head{background:#edf3fa;font-weight:bold;z-index:4}.fixed{z-index:2;background:#f4f7fb}.isotope{background:#fff3dc}
+input[type=text]{width:100%;height:23px;border:0;background:transparent;font:inherit}button{cursor:pointer}#status{height:26px;padding:4px;color:#666}
+</style></head><body><div id="viewport"><div id="space"></div><div id="cells"></div></div><div id="status"></div><script>
+const viewport=document.getElementById('viewport'),space=document.getElementById('space'),cells=document.getElementById('cells'),status=document.getElementById('status');
+let data=null,pending='',timer,serial=0;
+const boot=Date.now()+':'+Math.random();
+function send(type,values={}){parent.postMessage({isStreamlitMessage:true,type,...values},'*')}
+function event(value){send('streamlit:setComponentValue',{value:{...value,event_id:boot+':'+(++serial),row:Math.floor(viewport.scrollTop/34/50)*50},dataType:'json'})}
+function display(value){return value==null?'':typeof value==='number'?Number(value.toPrecision(6)).toString():String(value)}
+function cell(x,y,width,text,kind=''){let el=document.createElement('div');el.className='cell '+kind;el.style.cssText=`left:${x}px;top:${y}px;width:${width}px`;el.textContent=display(text);el.title=display(text);cells.appendChild(el);return el}
+function draw(){
+ if(!data)return;
+ let top=viewport.scrollTop,left=viewport.scrollLeft,first=Math.floor(top/34),last=Math.min(data.total,first+Math.ceil(viewport.clientHeight/34)+2);
+ cells.replaceChildren();
+ for(let r=first;r<last;r++){
+  const record=data.records[r-data.row];if(!record)continue;
+  let x=0;
+  for(const column of data.columns){
+   let fixed=column.key==='feature_id', el=cell(fixed?left:x,34+r*34,column.width,record[column.key],(fixed?'fixed ':'')+(record.is_isotope?'isotope':''));
+   if(column.key==='feature_id'){
+    el.style.cursor='pointer';if(record.feature_id===data.selected_feature)el.style.background='#cbe4ff';
+    el.title='点击定位细胞帧叠加谱中的特征峰';el.tabIndex=0;el.setAttribute('role','button');
+    el.onclick=()=>event({action:'select',id:record.annotation_id});
+    el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();el.onclick()}};
+   }else if(column.key==='accepted'||column.key==='is_isotope'){
+    el.textContent='';let input=document.createElement('input');input.type='checkbox';input.checked=!!record[column.key];
+    input.disabled=column.key==='accepted'&&(record.is_isotope||!record.name||!['MS1','MS/MS'].includes(record.match_level));
+    input.onchange=()=>event({action:'edit',id:record.annotation_id,column:column.key,value:input.checked});el.appendChild(input);
+   }else if(column.key==='mirror'){
+    el.textContent='';let button=document.createElement('button');button.textContent='MS/MS 对比';button.disabled=!record.has_msms||!record.reference_msms_available;
+    button.onclick=()=>event({action:'mirror',id:record.annotation_id});el.appendChild(button);
+   }else if(column.editable){
+    el.textContent='';let input=document.createElement('input');input.type='text';input.value=record[column.key]??'';
+    input.onchange=()=>event({action:'edit',id:record.annotation_id,column:column.key,value:input.value});el.appendChild(input);
+   }
+   x+=column.width;
+  }
+ }
+ let x=0;for(const column of data.columns){cell(column.key==='feature_id'?left:x,top,column.width,column.label,'head');x+=column.width}
+ const row=Math.floor(first/50)*50,request=String(row);
+ status.textContent=`${Math.min(first+1,data.total)}–${last} / ${data.total} · 滚动加载 · 文本修改后按 Enter 或移开焦点保存`;
+ clearTimeout(timer);if(row!==data.row&&pending!==request)timer=setTimeout(()=>{pending=request;event({action:'viewport',row})},100);
+}
+window.addEventListener('message',e=>{if(e.data.type!=='streamlit:render')return;
+ const incoming=e.data.args;if(data&&data.dataset!==incoming.dataset){viewport.scrollTop=0;viewport.scrollLeft=0}
+ data=incoming;pending='';space.style.width=data.columns.reduce((s,c)=>s+c.width,0)+'px';space.style.height=(34+data.total*34)+'px';cells.style.width=space.style.width;cells.style.height=space.style.height;draw();send('streamlit:setFrameHeight',{height:548})});
+viewport.addEventListener('scroll',()=>{if(!document.querySelector('input[type=text]:focus'))draw()});window.addEventListener('resize',draw);
+send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:548});
+</script></body></html>

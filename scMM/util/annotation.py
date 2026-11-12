@@ -5,26 +5,37 @@ import numpy as np
 import pandas as pd
 
 
-PROTON = 1.007276466812
-NA = 22.989218
-K = 38.963158
-NH4 = 18.033823
-CL = 34.969402
-FA = 44.998201
+ELECTRON = 0.000548579909065
+PROTON = 1.007276466621
+NA = 22.9897692820 - ELECTRON
+K = 38.9637064864 - ELECTRON
+NH4 = 14.00307400443 + 4 * 1.00782503223 - ELECTRON
+CL = 34.968852682 + ELECTRON
+FA = 12 + 2 * 1.00782503223 + 2 * 15.99491461957
 
 
 DEFAULT_ADDUCTS_POS = {
+    "[M]+": {"mass_shift": -ELECTRON, "charge": 1},
     "[M+H]+": {"mass_shift": PROTON, "charge": 1},
     "[M+Na]+": {"mass_shift": NA, "charge": 1},
     "[M+K]+": {"mass_shift": K, "charge": 1},
     "[M+NH4]+": {"mass_shift": NH4, "charge": 1},
+    "[M-H2O+H]+": {"mass_shift": PROTON - 18.01056468403, "charge": 1},
+    "[M+Li]+": {"mass_shift": 7.0160034366 - ELECTRON, "charge": 1},
 }
 
 DEFAULT_ADDUCTS_NEG = {
     "[M-H]-": {"mass_shift": -PROTON, "charge": 1},
     "[M+Cl]-": {"mass_shift": CL, "charge": 1},
-    "[M+FA-H]-": {"mass_shift": FA - PROTON, "charge": 1},
+    "[M+HCOO]-": {"mass_shift": FA - PROTON, "charge": 1},
+    "[M+CH3COO]-": {"mass_shift": 60.02112936806 - PROTON, "charge": 1},
 }
+
+# Accepted spelling used by older SDF callers.
+ADDUCT_ALIASES = {"[M+FA-H]-": "[M+HCOO]-", "[M+HCOOH-H]-": "[M+HCOO]-",
+                  "M+": "[M]+", "[M+]": "[M]+", "[M.]+": "[M]+",
+                  "[M+H-H2O]+": "[M-H2O+H]+", "[M.Cl]-": "[M+Cl]-",
+                  "[M+CH3COOH-H]-": "[M+CH3COO]-"}
 
 
 def parse_sdf_record(record: str) -> dict:
@@ -34,7 +45,7 @@ def parse_sdf_record(record: str) -> dict:
     if lines:
         result["record_title"] = lines[0].strip()
 
-    pattern = re.compile(r"^> <(.+?)>$")
+    pattern = re.compile(r"^>\s*<([^>]+)>")
 
     i = 0
     while i < len(lines):

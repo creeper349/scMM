@@ -188,6 +188,8 @@ def dimension_reduction(data:CyESIData | np.ndarray,
         ax.set_title(plot_kwargs["title"])
 
     ax.set_aspect("equal", adjustable="datalim")
+    from .ticks import tidy_numeric_ticks
+    tidy_numeric_ticks(ax.figure)
 
     return {
         "X_emb": emb,
