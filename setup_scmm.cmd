@@ -112,14 +112,20 @@ if (-not $python) {
 & $python -c "import sys,struct; print(sys.version); sys.exit(0 if sys.version_info[:2] == (3,11) and struct.calcsize('P') == 8 else 1)"
 if ($LASTEXITCODE -ne 0) { throw 'SCMM requires 64-bit Python 3.11. Check the environment path above.' }
 
-# Read the dependency list once; installed distributions are left in place.
+# Install missing distributions and update incompatible versions.
 $inspect = @'
 import importlib.metadata as metadata, json, pathlib, re, sys, sysconfig, tomllib
+from pip._vendor.packaging.requirements import Requirement
 project = tomllib.loads((pathlib.Path(sys.argv[1]) / 'pyproject.toml').read_text(encoding='utf-8'))['project']
 required = project['dependencies'] + project.get('optional-dependencies', {}).get('web', []) + project.get('optional-dependencies', {}).get('ml', [])
 normalize = lambda name: re.sub(r'[-_.]+', '-', name).lower()
 installed = {normalize(d.metadata['Name']): d for d in metadata.distributions(path=[sysconfig.get_path('purelib')]) if d.metadata['Name']}
-missing = [req for req in required if normalize(re.split(r'[<>=!~\[; ]', req, maxsplit=1)[0]) not in installed]
+missing = []
+for text in required:
+    requirement = Requirement(text)
+    distribution = installed.get(normalize(requirement.name))
+    if distribution is None or not requirement.specifier.contains(distribution.version, prereleases=True):
+        missing.append(text)
 print(json.dumps({'missing': missing, 'scmm': 'scmm' in installed, 'pythonnet': 'pythonnet' in installed,
                   'scmm_version': installed['scmm'].version if 'scmm' in installed else None,
                   'project_version': project['version']}))
@@ -133,7 +139,7 @@ $dlls = @('ThermoFisher.CommonCore.Data.dll', 'ThermoFisher.CommonCore.RawFileRe
 $missingDlls = @($dlls | Where-Object { -not (Test-Path -LiteralPath (Join-Path $dllDir $_)) })
 $rawReady = $packages.pythonnet -and $missingDlls.Count -eq 0
 Write-Host "[SCMM] Python: $python"
-Write-Host "[SCMM] Missing required packages: $($missing.Count)"
+Write-Host "[SCMM] Missing or incompatible packages: $($missing.Count)"
 Write-Host "[SCMM] Optional Thermo RAW reader ready: $rawReady"
 if ($checkOnly) {
     if ($missing.Count -gt 0 -or -not $packages.scmm) { throw 'Required packages are missing. Run setup_scmm.cmd to install them.' }

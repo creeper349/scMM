@@ -39,7 +39,7 @@ def load_metadata_csv(path):
 
 @dataclass
 class ProcessingConfig:
-    input_path: str
+    input_path: str | list[str]
     output_path: str
     reference_mz: list[float]
     reference_mode: str = "union"
@@ -63,6 +63,9 @@ class ProcessingConfig:
     frame_metadata: tuple[str, ...] = ()
     create_qc: bool = True
     msconvert_path: str = ""
+    rt_range: tuple[float, float] | None = None
+    frame_range: tuple[int, int] | None = None
+    file_ranges: dict | None = None
 
 
 def run_processing(
@@ -78,8 +81,9 @@ def run_processing(
         if progress_callback is not None:
             progress_callback(float(fraction), str(message))
 
-    source = Path(config.input_path).expanduser()
-    if not source.exists():
+    inputs = config.input_path
+    source = Path(inputs).expanduser() if isinstance(inputs, (str, Path)) else None
+    if source is not None and not source.exists():
         raise FileNotFoundError(source)
     mz_min = float(config.mz_min)
     mz_max = float(config.mz_max)
@@ -95,7 +99,7 @@ def run_processing(
             "Reference m/z must lie strictly inside the processing range "
             f"({mz_min:g}, {mz_max:g}); outside/boundary values: {outside}"
         )
-    report(0.01, f"检查输入路径: {source}")
+    report(0.01, f"检查输入路径: {inputs}")
     kwargs = {
         "reference_mz": config.reference_mz,
         "reference_mode": config.reference_mode,
@@ -115,19 +119,33 @@ def run_processing(
         "max_zero_fraction": config.max_zero_fraction,
         "feature_block_size": config.feature_block_size,
         "msconvert_path": config.msconvert_path or None,
+        "rt_range": config.rt_range,
+        "frame_range": config.frame_range,
+        "file_ranges": config.file_ranges,
         "progress_callback": lambda value, message: report(
             0.05 + 0.8 * value, message
         ),
     }
-    if source.is_dir() and source.suffix.lower() != ".raw":
+    if source is None or (source.is_dir() and source.suffix.lower() != ".raw"):
         data = CyESIData.load_from_directory(
-            source,
+            inputs,
             feature_strategy=config.feature_strategy,
             feature_merge_ppm=config.feature_merge_ppm,
             **kwargs,
         )
     else:
         data = CyESIData.load_from_file(source, **kwargs)
+    if config.rt_range is not None or config.frame_range is not None:
+        data.uns.setdefault("processing", {}).update(
+            frame_rt_range_seconds=list(config.rt_range or []),
+            original_frame_range=list(config.frame_range or []))
+    if config.file_ranges:
+        rows = []
+        for path, bounds in config.file_ranges.items():
+            rt = bounds.get("rt_range", (None, None))
+            frame = bounds.get("frame_range", (None, None))
+            rows.append(dict(source_file=path, rt_start=rt[0], rt_end=rt[1], frame_start=frame[0], frame_end=frame[1]))
+        data.uns.setdefault("processing", {})["file_frame_ranges"] = pd.DataFrame(rows).fillna(float("nan"))
     report(0.88, "写入 H5AD 结果")
     output = data.save(config.output_path)
     qc_output = None

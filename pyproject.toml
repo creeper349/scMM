@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scMM"
-version = "0.3.0"
+version = "0.3.0.post1"
 description = "CyESI single-cell mass-spectrometry data processing"
 requires-python = ">=3.10"
 authors = [
@@ -37,7 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 ml = ["imbalanced-learn>=0.13", "shap>=0.48"]
-web = ["streamlit>=1.40", "plotly>=5.24"]
+web = ["streamlit>=1.64,<2", "plotly>=7.1,<8"]
 thermo = ["pythonnet>=3.0,<4.0"]
 
 [project.scripts]
@@ -51,7 +51,7 @@ exclude = ["build*", "dist*", "packaging*", "tests*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-scMM = ["config/*.json", "components/matrix_table/*.html", "components/annotation_table/*.html"]
+scMM = ["config/*.json", "locales/*.json", "file/*.ps1", "components/matrix_table/*.html", "components/annotation_table/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

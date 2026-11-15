@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from .file.data import CyESIData
 
 __all__ = ["CyESIData"]
-__version__ = "0.3.0"
+__version__ = "0.3.0.post1"
 
 
 def __getattr__(name):

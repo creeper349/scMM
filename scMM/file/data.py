@@ -14,6 +14,8 @@ from .io import (load_single_file,
                  sum_spec, 
                  extract_peaks, 
                  align_frame)
+from .acquisition import resolve_ms_files
+from .trim import ranges_for_file
 from ..util.peak import filter_spectrum, find_cell_peaks
 from ..util.normalize import normalize
 from ..util.annotation import SDFMzSearcher, DEFAULT_ADDUCTS_NEG, DEFAULT_ADDUCTS_POS
@@ -243,17 +245,19 @@ class CyESIData(AnnData):
             return np.ones(self.n_vars, dtype=bool)
         return np.all(self.var[columns].to_numpy(dtype=np.uint8) == 1, axis=1)
 
-    def set_cell_filter(self, name, keep):
+    def set_cell_filter(self, name, keep, *, enabled=True):
         column = str(name)
         if not column.startswith(self.CELL_FILTER_PREFIX):
             column = f"{self.CELL_FILTER_PREFIX}{column}"
         values = np.asarray(keep, dtype=np.uint8)
         if values.shape != (self.n_obs,):
             raise ValueError("cell filter must contain one value per cell")
-        self.obs[column] = values
         active = list(self.uns.get("active_cell_filters", self.cell_filter_columns()))
-        if column not in active:
+        self.obs[column] = values
+        if enabled and column not in active:
             active.append(column)
+        if not enabled:
+            active = [name for name in active if name != column]
         self.set_active_cell_filters(active)
         return column
 
@@ -474,9 +478,9 @@ class CyESIData(AnnData):
         var = pd.DataFrame(
             {
                 "mz": cell_df.columns.astype(float),
-                "zero_fraction": result["zero_fraction"].loc[
-                    cell_df.columns
-                ].to_numpy(),
+                "zero_fraction": result["zero_fraction"].to_numpy()[
+                    result["kept_columns"].to_numpy(dtype=bool)
+                ],
             },
             index=pd.Index(cell_df.columns.astype(str), name="feature_id"),
         )
@@ -530,6 +534,9 @@ class CyESIData(AnnData):
         debug_hook=None,
         progress_callback=None,
         msconvert_path=None,
+        rt_range=None,
+        frame_range=None,
+        file_ranges=None,
         **preprocess_kwargs,
     ):
         """Load one mzML/mzXML/vendor RAW file and return cell-level AnnData."""
@@ -537,6 +544,8 @@ class CyESIData(AnnData):
         if reference_mz is None:
             raise ValueError("reference_mz is required")
         dtype = _validate_float_dtype(dtype)
+
+        selection = ranges_for_file(file_path, file_ranges, rt_range=rt_range, frame_range=frame_range)
 
         def report(fraction, message):
             if progress_callback is not None:
@@ -560,6 +569,7 @@ class CyESIData(AnnData):
             points_per_fwhm=resample_points_per_fwhm,
             ms_level=1,
             intensity_dtype=dtype,
+            **selection,
         )
         summed_mz, summed_intensity = summed.get_peaks()
         summed_mz = np.asarray(summed_mz, dtype=np.float64).copy()
@@ -591,6 +601,7 @@ class CyESIData(AnnData):
             prominence_ratio=prominence_ratio,
             distance=distance,
             resolution_200=resolution,
+            **selection,
         )
         frame_obs = cls._frame_obs(
             frame_meta,
@@ -666,6 +677,9 @@ class CyESIData(AnnData):
         progress_callback=None,
         log_memory=True,
         msconvert_path=None,
+        rt_range=None,
+        frame_range=None,
+        file_ranges=None,
         **preprocess_kwargs,
     ):
         """Process a directory using a shared feature axis and bounded memory."""
@@ -673,16 +687,9 @@ class CyESIData(AnnData):
         if reference_mz is None:
             raise ValueError("reference_mz is required")
         dtype = _validate_float_dtype(dtype)
-        root = Path(dir_path)
-        files = sorted(
-            path for path in root.iterdir()
-            if (
-                path.suffix.lower() in {".mzml", ".mzxml", ".raw"}
-                and (path.is_file() or path.suffix.lower() == ".raw")
-            )
-        )
+        files = resolve_ms_files(dir_path)
         if not files:
-            raise FileNotFoundError(f"No mzML/mzXML/RAW files found in {root}")
+            raise FileNotFoundError(f"No mzML/mzXML/RAW files found in {dir_path}")
 
         total_mz = None
         total_intensity = None
@@ -706,6 +713,7 @@ class CyESIData(AnnData):
                 points_per_fwhm=resample_points_per_fwhm,
                 ms_level=1,
                 intensity_dtype=dtype,
+                **ranges_for_file(path, file_ranges, rt_range=rt_range, frame_range=frame_range),
             )
             mz_grid, intensity = summed.get_peaks()
             mz_grid = np.asarray(mz_grid, dtype=np.float64)
@@ -783,6 +791,7 @@ class CyESIData(AnnData):
                 prominence_ratio=prominence_ratio,
                 distance=distance,
                 resolution_200=resolution,
+                **ranges_for_file(path, file_ranges, rt_range=rt_range, frame_range=frame_range),
             )
             frame_obs = cls._frame_obs(
                 frame_meta,
@@ -881,7 +890,7 @@ class CyESIData(AnnData):
                     path.name: dict(meta) for path, meta in file_records
                 },
                 "file_meta": {
-                    "name": root.name,
+                    "name": Path(dir_path).name if isinstance(dir_path, (str, Path)) else "selected_files",
                     "reference_mz": np.atleast_1d(reference_mz).astype(float).tolist(),
                 },
                 "processing": {
@@ -954,16 +963,9 @@ class CyESIData(AnnData):
         **kwargs,
     ):
         """Process every file independently and union features by ppm."""
-        root = Path(dir_path)
-        files = sorted(
-            path for path in root.iterdir()
-            if (
-                path.suffix.lower() in {".mzml", ".mzxml", ".raw"}
-                and (path.is_file() or path.suffix.lower() == ".raw")
-            )
-        )
+        files = resolve_ms_files(dir_path)
         if not files:
-            raise FileNotFoundError(f"No supported MS files found in {root}")
+            raise FileNotFoundError(f"No supported MS files found in {dir_path}")
         objects = []
         for file_index, path in enumerate(tqdm(
             files,
@@ -996,7 +998,7 @@ class CyESIData(AnnData):
         result = cls._merge_independent_objects(
             objects,
             ppm_tolerance=feature_merge_ppm,
-            dataset_name=root.name,
+            dataset_name=Path(dir_path).name if isinstance(dir_path, (str, Path)) else "selected_files",
         )
         result.uns["processing"].update(
             {

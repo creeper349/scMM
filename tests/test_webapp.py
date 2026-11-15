@@ -19,7 +19,8 @@ _state(st)
 import numpy as np
 import pandas as pd
 from scMM.file.data import CyESIData
-st.session_state.data = CyESIData(
+if st.session_state.data is None:
+    st.session_state.data = CyESIData(
     X=np.random.default_rng(2).random((20, 6)).astype("float32"),
     obs=pd.DataFrame(
         {"group": ["a"] * 10 + ["b"] * 10,
@@ -42,6 +43,59 @@ def test_default_webapp_page_renders():
     path = Path(__file__).parents[1] / "scMM" / "webapp.py"
     app = AppTest.from_file(path, default_timeout=30).run()
     assert not app.exception
+
+
+def test_batch_dialog_autofills_acquisition_and_preserves_manual_edits(tmp_path, monkeypatch):
+    source = tmp_path / "input.mzML"
+    source.write_text('''<mzML><spectrum><cvParam accession="MS:1000511" value="1"/>
+    <scanList><scan><cvParam accession="MS:1000800" value="50000"/>
+    <scanWindow><cvParam accession="MS:1000501" value="80"/>
+    <cvParam accession="MS:1000500" value="1500"/></scanWindow></scan></scanList></spectrum></mzML>''')
+    monkeypatch.setattr("scMM.file.dialogs.choose_data_paths", lambda: [str(source)])
+    app = _assert_page_renders("page_data")
+    radio = next(widget for widget in app.radio if widget.label == "输入模式")
+    radio.set_value(radio.options[2]).run()
+    next(button for button in app.button if button.label == "📁 选择文件夹或多个质谱文件").click().run()
+    assert not app.exception
+    assert app.number_input(key="processing_mz_min").value == 80.
+    assert app.number_input(key="processing_mz_max").value == 1500.
+    assert app.number_input(key="processing_resolution").value == 50000.
+    app.number_input(key="processing_resolution").set_value(45000.).run()
+    assert app.number_input(key="processing_resolution").value == 45000.
+    app.text_area(key="input_path").set_value("").run()
+    assert app.number_input(key="processing_resolution").value == 35000.
+    assert app.number_input(key="processing_mz_max").value == 1000.
+
+
+def test_correlation_distribution_calculates_labels_and_exports():
+    app = _assert_page_renders("page_analysis", with_data=True)
+    app.button(key="corr_compute").click().run()
+    assert not app.exception and not app.error
+    result = app.session_state.correlation_distribution_result["result"]
+    assert len(result) == 5
+    app.selectbox(key="corr_label_mode").set_value("仅手动")
+    app.multiselect(key=f"corr_named_features_{id(result)}").set_value([result.feature_id.iloc[0]]).run()
+    assert not app.exception
+    import json
+    figure = next(json.loads(chart.proto.spec) for chart in app.get("plotly_chart")
+                  if json.loads(chart.proto.spec).get("layout", {}).get("meta", {}).get("scmm_plot") == "correlation_distribution")
+    assert sum(bool(label) for label in figure["layout"]["meta"]["scmm_correlation_labels"]) == 1
+    app.button(key="correlation_distribution_export_open").click().run()
+    app.button(key="correlation_distribution_export_open").click()
+    app.button(key="correlation_distribution_preview").click().run()
+    assert not app.exception and not app.error
+    assert b"<text" in app.session_state.correlation_distribution_matplotlib_preview["payload"]
+
+
+def test_background_training_commits_model_and_report():
+    app = _assert_page_renders("page_analysis", with_data=True)
+    next(widget for widget in app.number_input if widget.label == "CV folds").set_value(2)
+    next(button for button in app.button if button.label == "训练、交叉验证并生成质控").click().run()
+    assert not app.exception
+    assert not app.error
+    assert app.session_state.supervised is not None
+    assert not app.session_state.result_table.empty
+    assert app.session_state.background_job is None
 
 
 def test_subpages_render_without_data():
@@ -130,6 +184,38 @@ def test_gate_selection_accepts_streamlit_customdata_formats():
     assert selected.tolist() == [3, 7, 11]
 
 
+def test_gate_selection_fraction_and_active_export_color(monkeypatch):
+    import streamlit as st
+
+    points = []
+    original_chart = st.plotly_chart
+
+    def chart(*args, **kwargs):
+        result = original_chart(*args, **kwargs)
+        if kwargs.get("key") == "cell_gate_plot":
+            return {"selection": {"points": points}}
+        return result
+
+    monkeypatch.setattr(st, "plotly_chart", chart)
+    app = _assert_page_renders("page_preprocess", with_data=True)
+    assert any("0 / 20（0.00%" in caption.value for caption in app.caption)
+    points.extend([{"customdata": [2]}, {"customdata": [7]}])
+    app.run()
+    assert not app.exception
+    assert any("2 / 20（10.00%" in caption.value for caption in app.caption)
+    points.clear()
+    app.run()
+    assert any("0 / 20（0.00%" in caption.value for caption in app.caption)
+    next(button for button in app.button if button.key == "cell_gate_export_open").click().run()
+    assert not app.exception
+    app.color_picker(key="cell_gate_active_color").set_value("#ef4444")
+    next(button for button in app.button if button.key == "cell_gate_export_open").click()
+    next(button for button in app.button if button.key == "cell_gate_preview").click().run()
+    assert not app.exception
+    payload = app.session_state["cell_gate_matplotlib_preview"]["payload"]
+    assert b"#ef4444" in payload
+
+
 def test_targeted_analysis_and_matplotlib_preview_dialog():
     app = _assert_page_renders("page_analysis", with_data=True)
     next(widget for widget in app.radio if widget.label == "差异分析模式").set_value("靶向差异分析")
@@ -148,6 +234,92 @@ def test_targeted_analysis_and_matplotlib_preview_dialog():
     next(button for button in app.button if button.key == "targeted_distribution_preview").click()
     app.run()
     assert not app.exception
+
+
+def test_gate_label_filtering_is_controlled_by_table(monkeypatch):
+    import json
+    import streamlit as st
+
+    positions = [1, 4]
+    original_chart = st.plotly_chart
+
+    def chart(*args, **kwargs):
+        result = original_chart(*args, **kwargs)
+        if kwargs.get("key") == "cell_gate_plot":
+            return {"selection": {"points": [{"customdata": [index]} for index in positions]}}
+        return result
+
+    monkeypatch.setattr(st, "plotly_chart", chart)
+    app = AppTest.from_string('''
+import streamlit as st
+import numpy as np
+from scMM.file.data import CyESIData
+from scMM.webapp import _state, page_preprocess
+_state(st)
+if st.session_state.data is None:
+    st.session_state.data = CyESIData(X=np.random.default_rng(2).random((20, 3)))
+page_preprocess()
+''', default_timeout=30).run()
+    next(button for button in app.button if button.label == "写入圈门标签").click().run()
+    assert not app.exception
+    column = "cell_keep_manual_gate"
+    assert app.session_state.data.obs[column].eq(0).sum() == 2
+    assert app.session_state.data.cell_keep_mask().all()
+
+    for enabled in [True, False, True]:
+        editor = next(table for table in app.dataframe if "启用筛选" in table.value.columns)
+        states = app._tree.get_widget_states()
+        state = next((state for state in states.widgets if state.id == editor.proto.id), None)
+        if state is None:
+            state = states.widgets.add()
+            state.id = editor.proto.id
+        state.string_value = json.dumps({"edited_rows": {0: {"启用筛选": enabled}},
+                                        "added_rows": [], "deleted_rows": []})
+        app._run(widget_state=states)
+        assert not app.exception
+        assert app.session_state.data.cell_keep_mask().sum() == (18 if enabled else 20)
+        assert app.session_state.data.obs[column].eq(0).sum() == 2
+
+    positions[:] = [2]
+    next(button for button in app.button if button.label == "写入圈门标签").click().run()
+    assert not app.exception
+    assert app.session_state.data.cell_keep_mask().sum() == 19
+
+
+def test_targeted_distribution_export_controls():
+    app = _assert_page_renders("page_analysis", with_data=True)
+    next(widget for widget in app.radio if widget.label == "差异分析模式").set_value("靶向差异分析").run()
+    app.selectbox(key="target_plot_type").set_value("箱线图").run()
+    app.multiselect(key="target_extra_pairs").set_value([("a", "b")]).run()
+    assert not app.exception
+    app.button(key="targeted_distribution_export_open").click().run()
+    assert not app.exception
+    app.selectbox(key="targeted_distribution_distribution_kind").set_value("violin")
+    app.selectbox(key="targeted_distribution_export_significance").set_value("p 值")
+    app.color_picker(key="targeted_distribution_export_shape_a").set_value("#123456")
+    app.color_picker(key="targeted_distribution_export_points_a").set_value("#fedcba")
+    app.button(key="targeted_distribution_export_open").click()
+    app.button(key="targeted_distribution_preview").click().run()
+    assert not app.exception
+    assert not app.error
+    svg = app.session_state["targeted_distribution_matplotlib_preview"]["payload"]
+    assert b"#123456" in svg and b"#fedcba" in svg and b"p=" in svg
+
+
+def test_untargeted_distribution_can_hide_statistics_in_box_export():
+    app = _assert_page_renders("page_analysis", with_data=True)
+    next(button for button in app.button if button.label == "差异分析（BH-FDR）").click().run()
+    app.button(key="differential_distribution_export_open").click().run()
+    assert not app.exception
+    app.selectbox(key="differential_distribution_distribution_kind").set_value("box")
+    app.checkbox(key="differential_distribution_export_statistics").uncheck()
+    app.color_picker(key="differential_distribution_export_shape_a").set_value("#123456")
+    app.button(key="differential_distribution_export_open").click()
+    app.button(key="differential_distribution_preview").click().run()
+    assert not app.exception
+    assert not app.error
+    svg = app.session_state["differential_distribution_matplotlib_preview"]["payload"]
+    assert b"#123456" in svg and b"p=" not in svg
 
 
 def test_heatmap_actions_for_cells_features_and_files():

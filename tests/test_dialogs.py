@@ -3,6 +3,16 @@ from types import SimpleNamespace
 from scMM.file.dialogs import _windows_dialog
 
 
+def test_batch_dialog_returns_folders_and_multiple_files(monkeypatch):
+    from scMM.file.dialogs import choose_data_paths
+    def run(args, **kwargs):
+        assert args[-1].endswith("select_inputs.ps1")
+        return SimpleNamespace(stdout="D:\\数据\r\nD:\\other\\a.raw\r\nD:\\other\\b.mzML")
+    monkeypatch.setattr("scMM.file.dialogs.sys.platform", "win32")
+    monkeypatch.setattr("scMM.file.dialogs.subprocess.run", run)
+    assert choose_data_paths() == ["D:\\数据", "D:\\other\\a.raw", "D:\\other\\b.mzML"]
+
+
 def test_save_dialog_uses_unicode_default_name_and_selected_directory(monkeypatch):
     import base64
     from scMM.file.dialogs import choose_save_path

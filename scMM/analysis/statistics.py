@@ -77,3 +77,35 @@ def numeric_association(x, y, *, permutations=999, confidence=0.95, seed=42):
         "permutations": int(permutations),
         "confidence": float(confidence),
     }
+
+
+def feature_correlations(data, target, *, method="pearson", include_zeros=True,
+                         exclude_feature=None, progress=None):
+    """Correlate one numeric vector with active features in the current X."""
+    cells = data.cell_keep_mask()
+    positions = np.flatnonzero(data.feature_keep_mask())
+    target = np.asarray(target, float)[cells]
+    target[~np.isfinite(target)] = np.nan
+    if not include_zeros:
+        target[target == 0] = np.nan
+    series = pd.Series(target)
+    parts = []
+    for start in range(0, len(positions), 256):
+        selected = positions[start:start + 256]
+        matrix = data.X[np.ix_(np.flatnonzero(cells), selected)]
+        values = matrix.toarray() if hasattr(matrix, "toarray") else np.asarray(matrix)
+        frame = pd.DataFrame(values, columns=data.var_names[selected], dtype=float)
+        frame = frame.replace([np.inf, -np.inf], np.nan)
+        if not include_zeros:
+            frame = frame.mask(frame == 0)
+        counts = frame.notna().mul(series.notna(), axis=0).sum().to_numpy(int)
+        correlations = frame.corrwith(series, method=method).to_numpy()
+        correlations[counts < 3] = np.nan
+        parts.append(pd.DataFrame({"feature_id": frame.columns, "correlation": correlations, "n": counts}))
+        if progress:
+            progress(min(start + 256, len(positions)) / len(positions),
+                     f"逐特征相关性: {min(start + 256, len(positions))}/{len(positions)} features")
+    result = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["feature_id", "correlation", "n"])
+    if exclude_feature is not None:
+        result = result.loc[result.feature_id != str(exclude_feature)]
+    return result.sort_values("correlation", kind="stable", na_position="last").reset_index(drop=True)

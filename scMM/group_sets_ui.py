@@ -11,7 +11,7 @@ from scMM.plot.group_sets import group_set_figure
 
 def _figure_export(st, builder, key, *, context=(), description=""):
     from scMM.webapp import _save_image, _image_filename
-    if not st.button("Matplotlib 绘图参数与导出", key=f"{key}_export"):
+    if not st.button("图片设置与导出", key=f"{key}_export"):
         return
 
     @st.dialog("绘图参数、预览与保存", width="large")

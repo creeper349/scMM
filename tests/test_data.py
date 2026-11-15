@@ -1,9 +1,34 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from anndata import AnnData
 
 from scMM.file.data import CyESIData
+
+
+@pytest.mark.parametrize("max_zero_fraction, count", [(0.9, 908), (1.0, 909)])
+def test_duplicate_mz_metadata_follows_retained_column_positions(max_zero_fraction, count):
+    values = np.full((100, 909), 10.0, dtype=np.float32)
+    for start in (20, 60):
+        values[start:start + 3, :907] += np.asarray([30, 60, 30])[:, None]
+    values[20:23, 907] += [30, 60, 30]
+    values[:, 908] = 0
+    masses = np.r_[np.arange(100.0, 1008.0), 1007.0]
+    frame = pd.DataFrame(values, columns=masses)
+    data = CyESIData._from_aligned_frames(
+        frame, pd.DataFrame({"frame_id": np.arange(100)}),
+        reference_mz=100.0, reference_mode="union", source_file="test.mzML",
+        file_meta={}, dtype=np.float32, baseline_window=11, noise_window=15,
+        cell_signal_threshold=2, feature_snr_threshold=5,
+        max_zero_fraction=max_zero_fraction, show_progress=False,
+    )
+    assert data.shape == (2, count)
+    np.testing.assert_allclose(data.var["mz"], masses[:count])
+    np.testing.assert_allclose(data.var["zero_fraction"],
+                               np.r_[np.zeros(907), 0.5, 1.0][:count])
+    np.testing.assert_allclose(data.X[:, 907], [60, 0])
+    assert data.layers["feature_snr"].shape == data.shape
 
 
 def test_cyesidata_is_anndata_and_roundtrips_h5ad(tmp_path):
@@ -101,6 +126,26 @@ def test_isolation_forest_labels_without_removing_cells():
     assert data.n_obs == 30
     assert "cell_keep_iforest" in data.obs
     assert set(data.obs["cell_keep_iforest"].unique()) <= {0, 1}
+
+
+def test_cell_label_can_be_saved_without_enabling_filter(tmp_path):
+    data = CyESIData(X=np.ones((3, 2)),
+                    obs=pd.DataFrame({"cell_keep_qc": np.array([1, 1, 0], dtype=np.uint8)},
+                                     index=["a", "b", "c"]))
+    column = data.set_cell_filter("gate", [0, 1, 1], enabled=False)
+    assert data.uns["active_cell_filters"] == ["cell_keep_qc"]
+    assert data.cell_keep_mask().tolist() == [True, True, False]
+    assert data.obs[column].dtype == np.dtype("uint8")
+    data.set_active_cell_filters(["cell_keep_qc", column])
+    assert data.cell_keep_mask().tolist() == [False, True, False]
+    data.set_active_cell_filters([])
+    restored = CyESIData.read(data.save(tmp_path / "labels.h5ad"))
+    assert restored.cell_keep_mask().all()
+    assert restored.obs[column].tolist() == [0, 1, 1]
+    restored.set_active_cell_filters([column])
+    assert restored.active_view().n_obs == 2
+    restored.set_cell_filter(column, [1, 0, 0], enabled=False)
+    assert restored.cell_keep_mask().all()
 
 
 def test_processing_layers_preserve_inputs_and_roundtrip(tmp_path):

@@ -37,9 +37,12 @@ def _var_mapping_editor(st, fields, *, key, defaults, prefix=""):
 
 def _number(st, name, key, default, minimum, maximum, *, step=None, format=None):
     from scMM.webapp import _parameter
+    import streamlit
     value, help_text = _parameter(f"annotation.{key}", default)
     value = default if value is None else value
     kwargs = dict(min_value=minimum, max_value=maximum, value=value, key=f"ann_{key}", help=help_text)
+    if f"ann_{key}" in streamlit.session_state:
+        kwargs.pop("value")
     if step is not None:
         kwargs["step"] = step
     if format is not None:
@@ -116,14 +119,17 @@ def apply_table_edit(data, table, row_id, column, value):
 
 
 def _dynamic_table(st, data, table):
+    from scMM.i18n import tr
     import streamlit.components.v1 as components
     component = components.declare_component("scmm_annotation_table", path=str(Path(__file__).with_name("components") / "annotation_table"))
     row = st.session_state.get("ann_table_row", 0)
     row = min(row, max(0, len(table) - 1))
     chunk = table.iloc[row:row+100].reset_index()
     records = chunk.astype(object).where(chunk.notna(), None).to_dict("records")
-    columns = [dict(key=k, label=label, width=width, editable=k in {"name", "formula", "category", "adduct", "database_id"}) for k, label, width in _COLUMNS]
+    columns = [dict(key=k, label=tr(label), width=width, editable=k in {"name", "formula", "category", "adduct", "database_id"}) for k, label, width in _COLUMNS]
     event = component(dataset=str(id(data)), total=len(table), row=row, columns=columns, records=records,
+                      labels={"locate": tr("点击定位细胞帧叠加谱中的特征峰"), "mirror": tr("MS/MS 对比"),
+                              "status": tr("滚动加载 · 文本修改后按 Enter 或移开焦点保存")},
                       selected_feature=st.session_state.get("ann_spectrum_feature"),
                       key=f"ann_table_{id(data)}", default=None)
     if event and event.get("event_id") != st.session_state.get("ann_last_event"):
@@ -216,7 +222,7 @@ def _results(st, data, terminal):
     a, b = st.columns(2)
     if a.button("去同位素", help="沿用可逆 feature_keep 标签，将同位素特征标记为隐藏。"):
         data.set_feature_filter("annotation_isotope", ~data.var["annotation_isotope"].astype(bool).to_numpy())
-        a.success("已写入 var['feature_keep_annotation_isotope']，可在预处理页恢复。")
+        a.success("已隐藏同位素特征，可在预处理页恢复。")
     with st.expander("选择注释写入字段与 var 键名", expanded=True):
         mapping = _var_mapping_editor(st, table.columns.tolist(), key="ann_var_mapping", defaults={"name": "annotation"}, prefix="annotation_")
         if st.button("写入 var", disabled=not mapping):
@@ -308,10 +314,10 @@ def _spectrum_assistance(st, data, terminal):
     from scMM.analysis.annotation_tools import sum_cell_frames
     from scMM.file.dialogs import choose_local_path
     from scMM.plot.annotation import cell_spectrum_figure
-    from scMM.webapp import _execute, _plotly_with_export, _parameter, _choice
+    from scMM.webapp import _execute, _plotly_with_export, _parameter, _choice, _acquisition_defaults
     st.subheader("细胞帧叠加谱辅助注释")
     if not {"source_file", "frame_id"}.issubset(data.obs):
-        st.info("叠加细胞帧需要 obs 中的 source_file 和原始 frame_id；重新处理原始文件可生成这两项信息。")
+        st.info("当前数据缺少源文件或帧序号信息，请重新导入原始文件。")
         return
     plot_area = st.container()
     sources = data.obs["source_file"].astype(str).unique().tolist()
@@ -335,6 +341,12 @@ def _spectrum_assistance(st, data, terminal):
         left, right = st.columns([5, 1])
         source_paths[source] = left.text_input(f"{source} 的原始文件路径", key=key).strip().strip('"')
         right.button("选择文件", key=f"ann_cell_browse_{source}", on_click=browse)
+    finite_mz = data.var["mz"].to_numpy(float)
+    _acquisition_defaults(st, [path for path in source_paths.values() if path], "ann_cell", {
+        "mz_min": "annotation.cell_mz_min", "mz_max": "annotation.cell_mz_max",
+        "resolution": "annotation.cell_resolution"},
+        fallback_values={"mz_min": max(.01, float(np.nanmin(finite_mz)) - 2.),
+                         "mz_max": float(np.nanmax(finite_mz)) + 5.})
     a, b, c = st.columns(3)
     count = _number(a, "每个文件叠加细胞帧数" if sample_mode == "每个文件" else "叠加细胞帧总数", "cell_count", 20, 1, 100000)
     seed = _number(b, "抽样随机种子", "cell_seed", 42, 0, 2147483647)
@@ -359,7 +371,8 @@ def _spectrum_assistance(st, data, terminal):
                                    sample_mode="per_file" if sample_mode == "每个文件" else "total",
                                    mz_range=(mz_min, mz_max), resolution_200=resolution,
                                    points_per_fwhm=points, progress=progress)
-        result = _execute(st, terminal, "辅助注释 · 细胞帧叠加", run, "annotation_cell_spectrum")
+        result = _execute(st, terminal, "辅助注释 · 细胞帧叠加", run, "annotation_cell_spectrum",
+                          on_success=lambda result: st.session_state.update(ann_cell_spectrum=dict(settings=settings, **result)))
         if result is not None:
             st.session_state.ann_cell_spectrum = dict(settings=settings, **result)
     cache = st.session_state.get("ann_cell_spectrum", {})
@@ -377,11 +390,17 @@ def _spectrum_assistance(st, data, terminal):
         st.info("当前特征位于叠加 m/z 范围之外，可调整范围后重新叠加。")
     half_window = _number(b, "局部放大半宽（Da）", "cell_zoom", 2., .01, 100.)
     figure = cell_spectrum_figure(data, cache, feature, half_window=half_window)
-    _plotly_with_export(st, figure, "annotation_cell_spectrum", container=plot_area)
+    from scMM.plot.spectrum_overview import spectrum_overview_html
+    import streamlit.components.v1 as components
+    with plot_area:
+        components.html(spectrum_overview_html(figure), height=780, scrolling=False)
+    _plotly_with_export(st, figure, "annotation_cell_spectrum", container=plot_area, render=False)
 
 
 def render_annotation_page():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
     from scMM.webapp import _execute, _terminal, _parameter
     st.header("物质注释")
     data = st.session_state.data
@@ -404,14 +423,12 @@ def render_annotation_page():
             safety_factor=_number(a, "同位素强度上限安全系数", "isotope_safety", 1., .01, 10.),
         )
         if st.button("识别同位素", key="ann_deisotope"):
-            with st.spinner("识别同位素…"):
-                try:
-                    pairs = deisotope_features(data, **isotope_params)
-                    st.success(f"识别到 {int(data.var['annotation_isotope'].sum())} 个同位素特征。")
-                    if "annotation" in data.uns:
-                        st.info("同位素归属已更新；点击“开始注释 / 刷新”同步候选。")
-                except Exception as exc:
-                    st.error(str(exc))
+            pairs = _execute(st, _terminal(st), "识别同位素", lambda progress: (
+                progress(.1, "搜索同位素并计算回归"), deisotope_features(data, **isotope_params))[1])
+            if pairs is not None:
+                st.success(f"识别到 {int(data.var['annotation_isotope'].sum())} 个同位素特征。")
+                if "annotation" in data.uns:
+                    st.info("同位素归属已更新；点击“开始注释 / 刷新”同步候选。")
         restored = st.multiselect("手动恢复同位素特征", data.var_names[data.var["annotation_isotope"].astype(bool)].tolist(), key="ann_restore")
         if st.button("恢复所选特征", disabled=not restored):
             data.var.loc[restored, "annotation_isotope"] = np.uint8(0)
@@ -428,7 +445,7 @@ def render_annotation_page():
         adducts = st.multiselect("加合模式", available, default=available, key=f"ann_adducts_{mode}", help="按离子精确质量计算；[M]+ 包含失电子质量修正。")
         ppm = _number(st, "MS1 匹配 ppm 容差", "ms1_ppm", 5., .01, 500.)
     with tabs[2]:
-        st.caption("MS2 前体按 ppm 匹配；Thermo RAW 优先用官方质心谱汇总。其它 Profile 谱叠加后去基线与质心化；Profile 参数适用于此路径。MS1 与 MS3+ 不进入 MS/MS 匹配。")
+        st.caption("按前体质量匹配 MS/MS 谱图。轮廓谱可设置基线、信噪比和质心提取参数。")
         msms_path, msms_upload = _path_input(st, "实测 MS/MS 文件", "measured", multiple=True, types=["raw", "mzml", "mzxml"])
         library_path, library_upload = _path_input(st, "标准 MS/MS 谱库", "library", multiple=True, types=["msp", "mgf", "json", "csv", "tsv"])
         st.caption("可一次选择或上传多个标准谱库，与 MS1 数据库共同参与本次注释。")

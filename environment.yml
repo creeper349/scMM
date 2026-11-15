@@ -19,7 +19,7 @@ dependencies:
       - leidenalg==0.12.0
       - imbalanced-learn>=0.13
       - shap>=0.48
-      - streamlit>=1.40
-      - plotly>=5.24
+      - streamlit>=1.64,<2
+      - plotly>=7.1,<8
       - pyopenms
       - -e .

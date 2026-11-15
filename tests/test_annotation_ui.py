@@ -45,10 +45,10 @@ render_annotation_page()
     assert app.number_input(key='ann_carbon13').value == .01090012
     app.button(key='ann_deisotope').click().run()
     assert not app.exception
-    next(b for b in app.button if b.label == 'Accept First').click().run()
+    next(b for b in app.button if b.label == '接受首选结果').click().run()
     assert not app.exception
     assert app.session_state.data.uns['annotation']['table']['accepted'].sum() == 1
-    next(b for b in app.button if b.label == '写入 var').click().run()
+    next(b for b in app.button if b.label == '保存到特征信息').click().run()
     assert app.session_state.data.var.loc['f0','annotation'] == 'Glucose'
     next(b for b in app.button if b.label == '导出注释表格').click().run()
     assert not app.exception
@@ -193,18 +193,18 @@ render_annotation_page()
     assert cache['cells'] == ['b0','b2']
     assert [record['source_file'] for record in cache['sources']] == ['b.mzML']
     assert cache['sources'][0]['frame_ids'] == [0,2]
-    assert len(app.get('plotly_chart')) == 1
+    assert len(app.get('iframe')) == 1
     app.selectbox(key='ann_spectrum_feature').set_value('isotope').run()
     assert not app.exception
     assert app.session_state.ann_cell_spectrum is cache
-    assert 'isotope' in app.get('plotly_chart')[0].proto.spec
+    assert 'isotope' in app.get('iframe')[0].proto.srcdoc
     app.session_state.data.set_cell_filter('qc', np.array([True,True,False,True]))
     app.run()
     assert not app.exception
-    assert len(app.get('plotly_chart')) == 0
+    assert len(app.get('iframe')) == 0
     app.multiselect(key='ann_spectrum_sources').set_value(['a.mzML']).run()
     assert not app.exception
-    assert len(app.get('plotly_chart')) == 0
+    assert len(app.get('iframe')) == 0
     app.button(key='ann_cell_sum').click().run()
     assert app.session_state.ann_cell_spectrum['cells'] == ['a0','a2']
     from scMM.analysis.annotation import annotate_features
@@ -227,7 +227,7 @@ render_annotation_page()
     table_position = next(i for i, element in enumerate(elements)
                           if element.type == 'component_instance' and 'scmm_annotation_table' in element.proto.component_name)
     spectrum_position = next(i for i, element in enumerate(elements)
-                             if element.type == 'plotly_chart' and 'Cell-frame MS1 spectrum' in element.proto.spec)
+                             if element.type == 'iframe' and 'Cell-frame MS1 spectrum' in element.proto.srcdoc)
     pie_position = next(i for i, element in enumerate(elements)
                         if element.type == 'plotly_chart' and json.loads(element.proto.spec)['data'][0]['type'] == 'pie')
     parameter_keys = {'ann_spectrum_sources', 'ann_cell_count', 'ann_cell_seed', 'ann_cell_active',

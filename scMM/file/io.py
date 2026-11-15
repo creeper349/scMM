@@ -7,6 +7,7 @@ import numpy as np
 import os
 import logging
 from .thermo_raw import load_thermo_raw
+from .trim import selected_frames
 
 def load_single_file(
     path: str,
@@ -134,6 +135,8 @@ def sum_spec(
     normalize: bool = False,
     zero_outside: bool = True,
     intensity_dtype=np.float32,
+    rt_range=None,
+    frame_range=None,
 ):
 
     mz_min, mz_max = map(float, mz_range)
@@ -147,9 +150,7 @@ def sum_spec(
     acc = np.zeros_like(mz_grid, dtype=np.float64)
     total_spectra = 0
 
-    for spec in exp:
-        if spec.getMSLevel() != ms_level:
-            continue
+    for _, spec in selected_frames(exp, ms_level=ms_level, rt_range=rt_range, frame_range=frame_range):
 
         mz, inten = spec.get_peaks()
         mz, inten = _prepare_sorted_unique_peaks(mz, inten)
@@ -257,7 +258,19 @@ def extract_peaks(
 
     n = mz.size
 
-    for i in peak_idx:
+    boundaries = [0]
+    if method == "centroid":
+        for first, second in zip(peak_idx[:-1], peak_idx[1:]):
+            between = intensity[first + 1:second]
+            minima = np.flatnonzero(between == between.min()) + first + 1
+            plateaus = np.split(minima, np.flatnonzero(np.diff(minima) > 1) + 1)
+            midpoints = np.asarray([(part[0] + part[-1]) // 2 for part in plateaus])
+            valley = midpoints[np.argmin(np.abs(midpoints - (first + second) / 2))]
+            # The valley sample belongs to the left peak only.
+            boundaries.append(int(valley) + 1)
+    boundaries.append(n)
+
+    for peak_number, i in enumerate(peak_idx):
         mz0 = float(mz[i])
 
         fwhm = orbitrap_fwhm_at_mz(mz0, resolution_200)
@@ -281,6 +294,9 @@ def extract_peaks(
 
         left = max(0, i - half_window_pts)
         right = min(n, i + half_window_pts + 1)
+        if method == "centroid":
+            left = max(left, boundaries[peak_number])
+            right = min(right, boundaries[peak_number + 1])
 
         mz_win = mz[left:right]
         int_win = intensity[left:right]
@@ -367,6 +383,8 @@ def align_frame(
         dtype=np.float32,
         mz_dtype=np.float64,
         out=None,
+        rt_range=None,
+        frame_range=None,
         **kwargs
     ):
     """Align MS1 frames to a target m/z list.
@@ -425,9 +443,7 @@ def align_frame(
     frame_ids = []
     native_ids = []
 
-    for i, spec in enumerate(exp):
-        if spec.getMSLevel() != ms_level:
-            continue
+    for i, spec in selected_frames(exp, ms_level=ms_level, rt_range=rt_range, frame_range=frame_range):
         spectra.append((i, spec))
         rt_list.append(spec.getRT())
         frame_ids.append(i)

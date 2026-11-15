@@ -25,7 +25,7 @@ function draw(){
    let fixed=column.key==='feature_id', el=cell(fixed?left:x,34+r*34,column.width,record[column.key],(fixed?'fixed ':'')+(record.is_isotope?'isotope':''));
    if(column.key==='feature_id'){
     el.style.cursor='pointer';if(record.feature_id===data.selected_feature)el.style.background='#cbe4ff';
-    el.title='点击定位细胞帧叠加谱中的特征峰';el.tabIndex=0;el.setAttribute('role','button');
+    el.title=data.labels.locate;el.tabIndex=0;el.setAttribute('role','button');
     el.onclick=()=>event({action:'select',id:record.annotation_id});
     el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();el.onclick()}};
    }else if(column.key==='accepted'||column.key==='is_isotope'){
@@ -33,7 +33,7 @@ function draw(){
     input.disabled=column.key==='accepted'&&(record.is_isotope||!record.name||!['MS1','MS/MS'].includes(record.match_level));
     input.onchange=()=>event({action:'edit',id:record.annotation_id,column:column.key,value:input.checked});el.appendChild(input);
    }else if(column.key==='mirror'){
-    el.textContent='';let button=document.createElement('button');button.textContent='MS/MS 对比';button.disabled=!record.has_msms||!record.reference_msms_available;
+    el.textContent='';let button=document.createElement('button');button.textContent=data.labels.mirror;button.disabled=!record.has_msms||!record.reference_msms_available;
     button.onclick=()=>event({action:'mirror',id:record.annotation_id});el.appendChild(button);
    }else if(column.editable){
     el.textContent='';let input=document.createElement('input');input.type='text';input.value=record[column.key]??'';
@@ -44,7 +44,7 @@ function draw(){
  }
  let x=0;for(const column of data.columns){cell(column.key==='feature_id'?left:x,top,column.width,column.label,'head');x+=column.width}
  const row=Math.floor(first/50)*50,request=String(row);
- status.textContent=`${Math.min(first+1,data.total)}–${last} / ${data.total} · 滚动加载 · 文本修改后按 Enter 或移开焦点保存`;
+ status.textContent=`${Math.min(first+1,data.total)}–${last} / ${data.total} · ${data.labels.status}`;
  clearTimeout(timer);if(row!==data.row&&pending!==request)timer=setTimeout(()=>{pending=request;event({action:'viewport',row})},100);
 }
 window.addEventListener('message',e=>{if(e.data.type!=='streamlit:render')return;

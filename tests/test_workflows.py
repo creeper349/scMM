@@ -74,3 +74,37 @@ def test_processing_range_is_forwarded_to_file_loader(tmp_path, monkeypatch):
     )
     run_processing(config)
     assert captured["mz_range"] == (50.0, 1500.0)
+
+
+def test_processing_passes_explicit_file_list_to_batch_loader(tmp_path, monkeypatch):
+    captured = {}
+    class Result:
+        n_obs, n_vars = 2, 3
+        def save(self, path):
+            return Path(path)
+    def load(paths, **kwargs):
+        captured.update(paths=paths, **kwargs)
+        return Result()
+    monkeypatch.setattr(CyESIData, "load_from_directory", load)
+    paths = [str(tmp_path / "a.mzML"), str(tmp_path / "b.raw")]
+    run_processing(ProcessingConfig(paths, str(tmp_path / "out.h5ad"), [200.], create_qc=False))
+    assert captured["paths"] == paths
+
+
+def test_per_file_ranges_are_forwarded_and_saved_in_h5ad(tmp_path, monkeypatch):
+    import numpy as np
+    data = CyESIData(X=np.ones((2, 2)))
+    captured = {}
+    def load(paths, **kwargs):
+        captured.update(kwargs)
+        return data
+    monkeypatch.setattr(CyESIData, "load_from_directory", load)
+    source = str(tmp_path / "source.mzML")
+    ranges = {source: {"frame_range": [2, 4]}}
+    _, output, _ = run_processing(ProcessingConfig([source], str(tmp_path / "result.h5ad"), [200.],
+                                                  file_ranges=ranges, create_qc=False))
+    assert captured["file_ranges"] == ranges
+    restored = CyESIData.read(output)
+    table = restored.uns["processing"]["file_frame_ranges"]
+    assert table.source_file.iloc[0] == source
+    assert table.frame_start.iloc[0] == 2

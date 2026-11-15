@@ -1,4 +1,4 @@
-# SCMM-GUI 0.3.0
+# SCMM-GUI 0.3.0-fix
 
 A local web workbench for CyESI single-cell mass spectrometry, from scan-level signals to annotated cell-by-feature matrices and statistical analysis. The Python package is named `scMM`.
 
@@ -14,12 +14,21 @@ SCMM connects mass-spectral processing with cell-level analysis. It constructs a
 
 ## Download and start
 
-Download [SCMM_GUI_0.3.0.zip](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM_GUI_0.3.0.zip) and extract the complete folder. The distribution contains Python source, configuration files, documentation, and Windows setup and launch scripts. Previous distributions are available in [release/](https://github.com/creeper349/scMM/tree/main/release).
+Download [SCMM-GUI-0.3.0-fix.zip](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix.zip) and extract the complete folder. The distribution contains Python source, configuration files, documentation, and Windows setup and launch scripts. Previous distributions are available in [release/](https://github.com/creeper349/scMM/tree/main/release).
+
+This update includes per-file time/frame sliders, valley-bounded centroiding, native multi-file selection, correlation distribution plots, linked spectrum overviews, and Chinese/English language packs. See the [release notes](RELEASE_NOTES_0.3.0-fix.md), [upgrade guide](UPGRADE_TO_0.3.0-fix.md), and [language pack guide](docs/languages.md).
+
+Existing installations can use a matching patch directly in the original software folder.
+
+- [Patch from 0.2.0](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix-patch-from-0.2.0.zip)
+- [Patch from 0.3.0](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix-patch-from-0.3.0.zip)
+
+补丁完整解压到原软件目录，运行对应的 `apply_patch_*.cmd` 即可更新。步骤见[升级说明](UPGRADE_TO_0.3.0-fix.md)。
 
 ### Windows quick start
 
 1. Install **64-bit Python 3.11** or **Miniconda**. For Python, enable **Add python.exe to PATH** during installation.
-2. Open the extracted `SCMM_GUI_0.3.0` folder and run `setup_scmm.cmd`.
+2. Open the extracted `SCMM-GUI-0.3.0-fix` folder and run `setup_scmm.cmd`.
 3. Choose whether to install the optional Thermo RAW reader when prompted. The installer presents the official reader license.
 4. Run `start_scmm.cmd`. Open **http://127.0.0.1:8501** in the browser and keep the launch terminal running during analysis.
 

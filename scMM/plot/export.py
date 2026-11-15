@@ -15,13 +15,21 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
                   grid=False, legend=True, marker="o", jitter=0.08, violin_width=0.75,
                   bins=40, label_size=10, title_size=12, legend_size=9,
                   legend_location="best", xscale="linear", yscale="linear",
-                  xlim=None, ylim=None, annotation_size=None):
+                  xlim=None, ylim=None, annotation_size=None, active_color=None,
+                  distribution_kind=None, distribution_colors=None, significance_mode=None):
     if isinstance(figure.layout.meta, dict) and figure.layout.meta.get("scmm_plot") == "volcano":
         params = locals().copy()
         params.pop("figure")
         from .volcano import render_volcano
         return render_volcano(figure, **params)
+    if isinstance(figure.layout.meta, dict) and figure.layout.meta.get("scmm_plot") == "correlation_distribution":
+        params = locals().copy()
+        params.pop("figure")
+        from .correlation import render_correlations
+        return render_correlations(figure, **params)
     with mpl.rc_context({"font.family": font_family, "font.size": font_size, "svg.fonttype": "none"}):
+        metadata = figure.layout.meta if isinstance(figure.layout.meta, dict) else {}
+        group_colors = distribution_colors if distribution_colors is not None else metadata.get("scmm_distribution_colors", {})
         pairs = list(dict.fromkeys(
             (getattr(trace, "xaxis", None) or "x", getattr(trace, "yaxis", None) or "y")
             for trace in figure.data
@@ -84,6 +92,11 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
             x = list(raw_x) if raw_x is not None else []
             y = list(raw_y) if raw_y is not None else []
             color = getattr(getattr(trace, "line", None), "color", None) or getattr(getattr(trace, "marker", None), "color", None)
+            meta = figure.layout.meta if isinstance(figure.layout.meta, dict) else {}
+            if meta.get("scmm_plot") == "cell_gate" and name == "active" and active_color is not None:
+                color = active_color
+            style = group_colors.get(name, {})
+            color = style.get("points" if trace.type in {"scatter", "scattergl"} else "shape", color)
             if not isinstance(color, str) or color.startswith("rgba"):
                 color = mpl.colormaps[cmap](index / max(1, len(figure.data) - 1))
             if isinstance(color, str) and color.startswith("rgb("):
@@ -97,6 +110,8 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
                     ax.legend(wedges, labels, loc="upper left", bbox_to_anchor=(1, 1), fontsize=legend_size)
                 pie_axes.add(ax)
             elif trace.type in {"violin", "box"}:
+                kind = distribution_kind or trace.type
+                point_color = style.get("points", color)
                 if getattr(trace, "orientation", None) == "h" or (trace.y is None and trace.x is not None):
                     values = np.asarray(x, float)
                     values = values[np.isfinite(values)]
@@ -118,25 +133,32 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
                     if not len(values):
                         continue
                     position = order.index(group)
-                    if trace.type == "violin" and len(values) > 1 and np.ptp(values) > 0:
+                    if kind == "violin" and len(values) > 1 and np.ptp(values) > 0:
                         parts = ax.violinplot([values], positions=[position], widths=violin_width, showmedians=True)
                         for body in parts["bodies"]:
-                            body.set_facecolor(color); body.set_alpha(alpha); body.set_linewidth(line_width)
+                            body.set_facecolor(color); body.set_edgecolor(color)
+                            body.set_alpha(alpha); body.set_linewidth(line_width)
                         for key, part in parts.items():
                             if key != "bodies":
                                 part.set_linewidth(line_width)
+                                part.set_color(color)
                         if getattr(getattr(trace, "box", None), "visible", False):
                             ax.boxplot([values], positions=[position], widths=violin_width * .15,
-                                       showfliers=False, boxprops={"linewidth": line_width},
-                                       medianprops={"linewidth": line_width})
+                                       showfliers=False, boxprops={"linewidth": line_width, "color": color},
+                                       whiskerprops={"linewidth": line_width, "color": color},
+                                       capprops={"linewidth": line_width, "color": color},
+                                       medianprops={"linewidth": line_width, "color": "black"})
                     else:
                         ax.boxplot([values], positions=[position], widths=violin_width * .6,
-                                   boxprops={"linewidth": line_width}, whiskerprops={"linewidth": line_width},
-                                   medianprops={"linewidth": line_width}, showfliers=False)
+                                   patch_artist=True, boxprops={"linewidth": line_width, "facecolor": color,
+                                                              "edgecolor": color, "alpha": alpha},
+                                   whiskerprops={"linewidth": line_width, "color": color},
+                                   capprops={"linewidth": line_width, "color": color},
+                                   medianprops={"linewidth": line_width, "color": "black"}, showfliers=False)
                     show_points = getattr(trace, "points", None) or getattr(trace, "boxpoints", None)
                     if show_points:
                         ax.scatter(position + rng.uniform(-jitter, jitter, len(values)), values,
-                                   s=marker_size, alpha=alpha, marker=marker, color=color, linewidths=line_width * .3)
+                                   s=marker_size, alpha=alpha, marker=marker, color=point_color, linewidths=line_width * .3)
                 rotate = 35 if len(order) > 3 or any(len(str(value)) > 10 for value in order) else 0
                 ax.set_xticks(range(len(order)), [textwrap.fill(str(value), 14) for value in order],
                               rotation=rotate, ha="right" if rotate else "center")
@@ -203,6 +225,8 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
                                     color="white" if image.norm(z[row, column]) < .4 else "black")
 
         for annotation in figure.layout.annotations or []:
+            if annotation.name == "scmm_significance":
+                continue
             xref, yref = annotation.xref or "x", annotation.yref or "y"
             pair = (xref.replace(" domain", ""), yref.replace(" domain", ""))
             if pair in axes:
@@ -223,6 +247,8 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
                 else:
                     canvas.text(annotation.x, annotation.y, clean(annotation.text), ha="center", fontsize=label_size)
         for shape in figure.layout.shapes or []:
+            if shape.name == "scmm_significance":
+                continue
             if shape.type != "line":
                 continue
             for pair, ax in axes.items():
@@ -254,13 +280,20 @@ def render_figure(figure, *, file_format="svg", width=8, height=6, dpi=300,
             if xaxis and yaxis and xaxis.visible is False and yaxis.visible is False:
                 ax.set_axis_off()
             if xaxis and xaxis.range is not None: ax.set_xlim(*xaxis.range)
-            if yaxis and yaxis.range is not None: ax.set_ylim(*yaxis.range)
+            if yaxis and yaxis.range is not None and metadata.get("scmm_plot") != "distribution": ax.set_ylim(*yaxis.range)
             if xaxis and xaxis.autorange == "reversed": ax.invert_xaxis()
             if yaxis and yaxis.autorange == "reversed": ax.invert_yaxis()
             if xscale != "linear": ax.set_xscale(xscale)
             if yscale != "linear": ax.set_yscale(yscale)
             if xlim: ax.set_xlim(*xlim)
             if ylim: ax.set_ylim(*ylim)
+            if metadata.get("scmm_plot") == "distribution":
+                from .distribution import draw_comparisons
+                records = [row for row in metadata.get("scmm_comparisons", [])
+                           if (row["xaxis"], row["yaxis"]) == pair]
+                draw_comparisons(ax, records, categories[pair],
+                                 significance_mode or metadata.get("scmm_significance_mode", "stars"),
+                                 fontsize=label_size, linewidth=line_width, fixed_ylim=ylim is not None)
             ax.tick_params(labelsize=font_size)
             if grid: ax.grid(True, alpha=.25)
             else: ax.grid(False)

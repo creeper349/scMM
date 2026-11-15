@@ -132,3 +132,27 @@ def load_thermo_raw(path: str, *, centroid_ms2=False):
         return exp, metadata
     finally:
         raw_file.Dispose()
+
+
+def read_raw_acquisition_settings(path, max_scans=32):
+    adapter, device = _load_api()
+    raw = adapter.FileFactory(str(Path(path).resolve()))
+    windows, resolutions = [], []
+    count = 0
+    try:
+        raw.SelectInstrument(device.MS, 1)
+        for scan in range(int(raw.RunHeaderEx.FirstSpectrum), int(raw.RunHeaderEx.LastSpectrum) + 1):
+            if int(raw.GetFilterForScanNumber(scan).MSOrder) != 1:
+                continue
+            stats = raw.GetScanStatsForScanNumber(scan)
+            windows.append((float(stats.LowMass), float(stats.HighMass)))
+            trailer = raw.GetTrailerExtraInformation(scan)
+            for label, value in zip(trailer.Labels, trailer.Values):
+                if str(label).strip().rstrip(":").lower() in {"orbitrap resolution", "ft resolution", "resolution"}:
+                    resolutions.append(float(str(value).replace(",", "")))
+            count += 1
+            if count >= max_scans:
+                break
+        return windows, resolutions, count
+    finally:
+        raw.Dispose()

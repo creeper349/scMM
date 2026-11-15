@@ -99,6 +99,8 @@ def _state(st):
         "input_path": input_default,
         "preview_path": preview_default,
         "completed_steps": set(),
+        "background_job": None,
+        "h5ad_path": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -213,38 +215,80 @@ class Terminal:
         self.write(f"100% | {message}")
         self.render()
 
-    def fail(self, exc):
+    def fail(self, exc, traceback_text=None):
         if self.current is not None:
             task = self.st.session_state.tasks[self.current]
             task["status"] = "failed"
             task["message"] = str(exc)
             if task.get("substeps"):
                 task["substeps"][-1]["status"] = "failed"
-        self.write(f"ERROR | {type(exc).__name__}: {exc}")
-        self.write(traceback.format_exc().strip())
+        self.write(f"ERROR | {exc}")
+
         self.progress_slot.error(str(exc))
 
 
 def _terminal(st):
-    st.markdown("#### 实时任务终端")
+    st.markdown("#### 任务进度")
     progress_slot = st.empty()
     report_slot = st.empty()
     output_slot = st.empty()
     return Terminal(st, progress_slot, report_slot, output_slot)
 
 
-def _execute(st, terminal, title, function, completed_step=None):
-    terminal.start(title)
-    try:
-        result = function(terminal.update)
-    except Exception as exc:
-        terminal.fail(exc)
-        st.error(f"{title}失败：{exc}")
+def _poll_background(st, terminal):
+    from queue import Empty
+
+    job = st.session_state.get("background_job")
+    if job is None:
+        return
+    if job.applied:
+        st.session_state.background_job = None
+        return
+    terminal.current = job.task_index
+    while True:
+        try:
+            fraction, message = job.events.get_nowait()
+        except Empty:
+            break
+        terminal.update(fraction, message)
+    if job.done.is_set() and not job.applied:
+        try:
+            if job.error is not None:
+                terminal.fail(job.error, job.traceback)
+                st.error(f"任务失败：{job.error}")
+            else:
+                if job.on_success is not None and not job.result_applied:
+                    job.on_success(job.result)
+                job.result_applied = True
+                if job.completed_step:
+                    st.session_state.completed_steps.add(job.completed_step)
+                terminal.finish(f"{job.title}完成")
+        except Exception as exc:
+            job.error = exc
+            job.traceback = traceback.format_exc()
+            terminal.fail(exc, job.traceback)
+            st.error(f"接收任务结果失败：{exc}")
+        job.applied = True
+        st.session_state.background_job = None
+
+
+def _execute(st, terminal, title, function, completed_step=None, *, on_success=None):
+    from scMM.background import BackgroundJob
+
+    _poll_background(st, terminal)
+    if st.session_state.get("background_job") is not None:
+        st.info("当前任务正在运行，完成后可开始下一项计算。")
         return None
-    terminal.finish(f"{title}完成")
-    if completed_step:
-        st.session_state.completed_steps.add(completed_step)
-    return result
+    terminal.start(title)
+    job = BackgroundJob(function, on_success=on_success, completed_step=completed_step,
+                        task_index=terminal.current, title=title)
+    st.session_state.background_job = job
+    job.start()
+    while not job.done.wait(.1):
+        _poll_background(st, terminal)
+        terminal.render()
+    _poll_background(st, terminal)
+    return job.result if job.error is None else None
 
 
 def _pipeline_status(st):
@@ -262,10 +306,10 @@ def _pipeline_status(st):
         column.markdown(f"{'✅' if key in done else '○'} **{label}**")
 
 
-def _engine(st):
+def _engine(data):
     from scMM.plot.engine import PlotEngine
 
-    return PlotEngine.from_adata(st.session_state.data, copy=False)
+    return PlotEngine.from_adata(data, copy=False)
 
 
 def _layer_selector(st, data):
@@ -275,12 +319,12 @@ def _layer_selector(st, data):
     if st.session_state.get("layer_selector_seen") != (dataset, active):
         st.session_state.analysis_layer = active
     _, help_text = _parameter("data.analysis_layer", "raw", "选择后续计算、特征强度上色和结果矩阵使用的数据层。")
-    selected = st.sidebar.selectbox("分析数据层（X）", list(data.layers.keys()),
+    selected = st.sidebar.selectbox("分析数据层", list(data.layers.keys()),
                                     index=list(data.layers).index(active), key="analysis_layer", help=help_text)
     if selected != active:
         data.set_active_layer(selected)
     st.session_state.layer_selector_seen = (dataset, selected)
-    st.sidebar.caption(f"当前 X = layers[{selected!r}]。预处理会生成新层并自动选中，可随时切回。")
+    st.sidebar.caption(f"当前数据层：{selected}。预处理完成后自动选择新数据层。")
 
 
 def _browse(st, kind, state_key):
@@ -293,6 +337,106 @@ def _browse(st, kind, state_key):
         return
     if selected:
         st.session_state[state_key] = selected
+
+
+def _browse_data_inputs(st):
+    from scMM.file.dialogs import choose_data_paths
+    try:
+        selected = choose_data_paths()
+        if selected:
+            st.session_state.input_path = "\n".join(selected)
+    except Exception as exc:
+        st.error(f"无法打开本机选择器：{exc}")
+
+
+def _acquisition_defaults(st, paths, prefix, parameter_ids, *, fallback_values=None):
+    from scMM.file.acquisition import read_acquisition_settings, resolve_ms_files
+    files = resolve_ms_files(paths)
+    signature = (tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files),
+                 tuple((fallback_values or {}).items()))
+    signature_key = f"{prefix}_acquisition_signature"
+    changed = st.session_state.get(signature_key) != signature
+    if changed:
+        with st.spinner("读取采集参数"):
+            settings = read_acquisition_settings(files)
+        st.session_state[signature_key] = signature
+        st.session_state[f"{prefix}_acquisition"] = settings
+    settings = st.session_state.get(f"{prefix}_acquisition", {})
+    for name, parameter in parameter_ids.items():
+        key = f"{prefix}_{name}"
+        if changed or key not in st.session_state:
+            default = (fallback_values or {}).get(name, 35000. if name == "resolution" else (100. if name == "mz_min" else 1000.))
+            fallback, _ = _parameter(parameter, default)
+            fallback = default if fallback is None else fallback
+            st.session_state[key] = float(settings.get(name, fallback))
+    detected = [f"m/z {settings['mz_min']:g}–{settings['mz_max']:g}"] if "mz_min" in settings else []
+    if "resolution" in settings:
+        detected.append(f"分辨率 {settings['resolution']:g}")
+    if files:
+        st.caption(f"读取各文件前 32 个 MS1 的采集参数，自动填入{'、'.join(detected) or '默认值'}。多文件采用范围并集与最低分辨率，可手动调整。")
+        for row in settings.get("files", []):
+            if row.get("error"):
+                st.caption(f"{Path(row['file']).name} 参数读取失败，使用可用元数据或默认值。{row['error']}")
+
+
+def _browse_h5ad_output(st):
+    from scMM.file.dialogs import choose_local_path
+
+    try:
+        directory = choose_local_path("directory")
+        if directory:
+            current = Path(st.session_state.processing_output_path)
+            st.session_state.processing_output_path = str(Path(directory) / current.with_suffix(".h5ad").name)
+    except Exception as exc:
+        st.error(f"无法选择输出文件夹：{exc}")
+
+
+def _atomic_save_h5ad(data, destination):
+    target = Path(destination).expanduser().resolve()
+    if target.suffix.lower() != ".h5ad":
+        target = target.with_suffix(".h5ad")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".h5ad", delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        data.save(temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def _h5ad_save_controls(st, data, *, sidebar=False):
+    target = st.sidebar if sidebar else st
+    path = st.session_state.get("h5ad_path")
+    key = "sidebar" if sidebar else "results"
+    if path:
+        target.caption(f"当前 H5AD · {path}")
+    else:
+        target.caption("可在“结果与导出”中另存为 H5AD，随后继续保存到该文件。")
+    if target.button("保存到当前 H5AD", key=f"{key}_save_h5ad", disabled=not path):
+        terminal = _terminal(st)
+        result = _execute(st, terminal, "保存 H5AD",
+                          lambda progress: (progress(.1, "保存分析结果"), _atomic_save_h5ad(data, path))[1],
+                          on_success=lambda result: st.session_state.update(h5ad_path=str(result)))
+        if result is not None:
+            target.success(f"已保存至 {result}")
+    if not sidebar and target.button("另存为 H5AD", key="results_save_h5ad_as"):
+        from scMM.file.dialogs import choose_save_path
+        try:
+            destination = choose_save_path(Path(path).name if path else "scmm_result.h5ad",
+                                           Path(path).parent if path else None)
+        except Exception as exc:
+            st.error(f"无法打开保存对话框：{exc}")
+            return
+        if destination:
+            terminal = _terminal(st)
+            result = _execute(st, terminal, "另存 H5AD",
+                              lambda progress: (progress(.1, "写入 H5AD"), _atomic_save_h5ad(data, destination))[1],
+                              on_success=lambda result: st.session_state.update(h5ad_path=str(result)))
+            if result is not None:
+                st.success(f"已保存至 {result}")
+                st.rerun()
 
 
 def _h5ad_bytes(data):
@@ -337,7 +481,10 @@ def _sticky_matrix_table(st, data, obs_key, var_key):
     def metadata_values(series):
         return series.astype(object).where(series.notna(), None).tolist()
 
+    from scMM.i18n import tr
     request = component(
+        labels={key: tr(value) for key, value in
+                {"cells": "细胞", "features": "特征", "loading": "加载中…"}.items()},
         dataset=identity,
         nrows=data.n_obs,
         ncols=data.n_vars,
@@ -369,7 +516,8 @@ def _matrix_frame(data, rows, columns):
 def _matplotlib_plotly_bytes(figure, **params):
     from scMM.plot.export import render_figure
 
-    return render_figure(figure, **params)
+    from scMM.i18n import localize_figure
+    return render_figure(localize_figure(figure), **params)
 
 
 def _image_filename(key, file_format, *, figure=None, title=""):
@@ -381,6 +529,7 @@ def _image_filename(key, file_format, *, figure=None, title=""):
         "targeted_distribution": "靶向特征组间比较", "differential_heatmap": "差异特征热图",
         "correlation_heatmap": "特征相关性热图", "file_qc_heatmap": "文件质控热图",
         "feature_network": "特征相关性网络", "numeric_association": "相关性散点图",
+        "correlation_distribution": "特征相关系数分布图",
         "supervised_roc": "ROC", "supervised_latent": "监督学习得分图",
         "precision_recall": "PR曲线", "calibration": "校正曲线", "confusion_matrix": "混淆矩阵",
         "msms_mirror": "MSMS镜像谱", "annotation_coverage": "注释覆盖率", "annotation_categories": "注释物质类别",
@@ -437,10 +586,10 @@ def _plotly_with_export(st, figure, key, *, container=None, height=None, render=
     target = container or st
     if render:
         target.plotly_chart(figure, use_container_width=True, key=f"{key}_plotly", height=height or "content")
-    if not target.button("Matplotlib 重绘与导出", key=f"{key}_export_open"):
+    if not target.button("图片导出", key=f"{key}_export_open"):
         return
 
-    @st.dialog("Matplotlib 重绘参数与预览", width="large")
+    @st.dialog("图片设置与预览", width="large")
     def export_dialog():
         controls, preview = st.columns([1, 1.2])
         with controls:
@@ -461,6 +610,9 @@ def _plotly_with_export(st, figure, key, *, container=None, height=None, render=
                 marker = a.selectbox("点形状", ["o", ".", "s", "^", "D", "x", "+"], key=f"{key}_marker")
                 alpha_default = .75 if isinstance(figure.layout.meta, dict) and figure.layout.meta.get("scmm_plot") == "volcano" else .8
                 alpha = b.number_input("透明度", .05, 1.0, alpha_default, .05, key=f"{key}_alpha")
+                active_color = None
+                if key == "cell_gate" and figure.layout.meta.get("scmm_color_label") == "status":
+                    active_color = a.color_picker("active 细胞颜色", value="#2563eb", key=f"{key}_active_color")
                 cmap_options = ["viridis", "plasma", "inferno", "magma", "cividis", "turbo", "RdBu", "RdBu_r", "Spectral", "coolwarm"]
                 original_cmap = (figure.layout.meta or {}).get("scmm_cmap", "viridis") if isinstance(figure.layout.meta, dict) else "viridis"
                 cmap_index = next((i for i, name in enumerate(cmap_options) if name.lower() == str(original_cmap).lower()), 0)
@@ -474,6 +626,10 @@ def _plotly_with_export(st, figure, key, *, container=None, height=None, render=
                     annotation_size = b.number_input("火山图标注字号（pt）", 6., 48.,
                                                     float(figure.layout.meta.get("scmm_volcano_annotation_size", 10.)),
                                                     key=f"{key}_annotation_size")
+                if isinstance(figure.layout.meta, dict) and figure.layout.meta.get("scmm_plot") == "correlation_distribution":
+                    annotation_size = b.number_input("相关图标注字号（pt）", 6., 48.,
+                                                    float(figure.layout.meta.get("scmm_annotation_size", 10.)),
+                                                    key=f"{key}_annotation_size")
                 title_size = b.number_input("标题字号", 6, 48, 12, key=f"{key}_title_size")
                 legend_size = a.number_input("图例字号", 6, 40, 9, key=f"{key}_legend_size")
                 legend_location = b.selectbox("图例位置", ["best", "upper right", "upper left", "lower right", "lower left"], key=f"{key}_legend_location")
@@ -486,13 +642,26 @@ def _plotly_with_export(st, figure, key, *, container=None, height=None, render=
                     ylim = (b.number_input("Y 最小值", value=0.0, key=f"{key}_ymin"), b.number_input("Y 最大值", value=1.0, key=f"{key}_ymax"))
                 grid = a.checkbox("网格", value=False, key=f"{key}_grid")
                 legend = b.checkbox("图例", value=True, key=f"{key}_legend")
+            distribution_kind = distribution_colors = significance_mode = None
+            metadata = figure.layout.meta if isinstance(figure.layout.meta, dict) else {}
+            if metadata.get("scmm_plot") == "distribution":
+                original_kind = next((trace.type for trace in figure.data if trace.type in {"violin", "box"}), "violin")
+                distribution_kind = st.selectbox("重绘分布图类型", ["violin", "box"],
+                                                 index=int(original_kind == "box"),
+                                                 format_func=lambda kind: "小提琴图" if kind == "violin" else "箱线图",
+                                                 key=f"{key}_distribution_kind")
+                distribution_colors, significance_mode = _distribution_controls(
+                    st, list(metadata["scmm_distribution_colors"]), f"{key}_export",
+                    colors=metadata["scmm_distribution_colors"], mode=metadata["scmm_significance_mode"])
             params = dict(width=width, height=height_value, dpi=dpi, font_family=font_family,
                           font_size=font_size, title=title, xlabel=xlabel, ylabel=ylabel, cmap=cmap,
                           marker_size=marker_size, alpha=alpha, line_width=line_width, grid=grid,
                           legend=legend, marker=marker, jitter=jitter, violin_width=violin_width,
                           bins=bins, label_size=label_size, title_size=title_size, legend_size=legend_size,
                           legend_location=legend_location, xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim,
-                          annotation_size=annotation_size)
+                          annotation_size=annotation_size, active_color=active_color,
+                          distribution_kind=distribution_kind, distribution_colors=distribution_colors,
+                          significance_mode=significance_mode)
             signature = repr(params) + file_format + figure.to_json()
             cache_key = f"{key}_matplotlib_preview"
             if st.button("预览", key=f"{key}_preview", type="primary"):
@@ -509,7 +678,7 @@ def _plotly_with_export(st, figure, key, *, container=None, height=None, render=
                 _save_image(st, cached["payload"], filename)
             st.caption("调整参数后点击预览，再下载对应图像。SVG 保留可编辑文字。")
         with preview:
-            st.markdown("#### Matplotlib 预览")
+            st.markdown("#### 图片预览")
             if current:
                 st.image(cached["png"], width="stretch")
             else:
@@ -594,13 +763,15 @@ def _plot_embedding(
 
 
 def page_data():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     from scMM.file.data import CyESIData
     from scMM.workflows import ProcessingConfig, parse_reference_mz, run_processing
 
     st.header("数据导入与 CyESI 峰提取")
-    st.caption("选择一种明确的输入模式；本机选择按钮打开运行 SCMM 的电脑上的原生对话框。")
+    st.caption("选择数据文件或文件夹开始分析，也可打开已有结果。")
     _pipeline_status(st)
     terminal = _terminal(st)
     if st.session_state.data is not None:
@@ -609,16 +780,23 @@ def page_data():
     modes = {
         "加载已有 H5AD": "h5ad",
         "处理单个 mzML / mzXML / RAW 文件": "single",
-        "批量目录：统一质量轴（先累加所有文件，再用共同 m/z 特征提取）": "shared",
-        "批量目录：独立质量轴（每个文件单独寻峰，再按 ppm 合并并保留特有峰）": "independent",
+        "批量文件 / 文件夹：统一质量轴（先累加所有文件，再用共同 m/z 特征提取）": "shared",
+        "批量文件 / 文件夹：独立质量轴（每个文件单独寻峰，再按 ppm 合并并保留特有峰）": "independent",
     }
     mode_index, mode_help = _choice("data.input_mode", list(modes))
     label = st.radio("输入模式", list(modes), index=mode_index, help=mode_help)
     mode = modes[label]
-    choose_kind = "directory" if mode in {"shared", "independent"} else "file"
-    if st.button("📁 选择文件夹" if choose_kind == "directory" else "📄 选择文件"):
-        _browse(st, choose_kind, "input_path")
-    input_path = st.text_input("已选择路径", key="input_path", help=_parameter("data.input_path", "")[1])
+    batch = mode in {"shared", "independent"}
+    if st.button("📁 选择文件夹或多个质谱文件" if batch else "📄 选择文件"):
+        _browse_data_inputs(st) if batch else _browse(st, "file", "input_path")
+    if batch:
+        input_path = st.text_area("已选择路径（每行一个文件或文件夹）", key="input_path", help=_parameter("data.input_path", "")[1])
+    else:
+        input_path = st.text_input("已选择路径", key="input_path", help=_parameter("data.input_path", "")[1])
+
+    from scMM.trim_ui import render_trim_tool
+    crop_paths = [p.strip().strip('"') for p in input_path.splitlines() if p.strip()]
+    file_ranges = render_trim_tool(st, crop_paths, terminal)
 
     if mode == "h5ad":
         uploaded = st.file_uploader("也可以从浏览器上传 H5AD", type=["h5ad"], help=_parameter("data.upload_h5ad", None)[1])
@@ -641,7 +819,9 @@ def page_data():
             return result
 
         if st.button("加载 H5AD", type="primary", use_container_width=True):
-            result = _execute(st, terminal, "加载 H5AD", load_h5ad, "data")
+            source_path = str(Path(input_path).expanduser().resolve()) if input_path and uploaded is None else None
+            result = _execute(st, terminal, "加载 H5AD", load_h5ad, "data",
+                              on_success=lambda result: st.session_state.update(data=result, h5ad_path=source_path))
             if result is not None:
                 st.session_state.data = result
                 st.rerun()
@@ -656,24 +836,30 @@ def page_data():
     output_default, output_help = _parameter("data.output_path", "results/scmm_result.h5ad")
     output_default = Path(output_default)
     if not output_default.is_absolute(): output_default = Path.cwd() / output_default
-    output_path = st.text_input("H5AD 输出路径", value=str(output_default), help=output_help)
+    if "processing_output_path" not in st.session_state:
+        st.session_state.processing_output_path = str(output_default)
+    if st.button("📁 选择 H5AD 输出文件夹"):
+        _browse_h5ad_output(st)
+    output_path = st.text_input("H5AD 输出路径", key="processing_output_path", help=output_help)
     c1, c2 = st.columns(2)
     metadata_default, metadata_help = _parameter("data.metadata_path", "")
     metadata = c1.text_input("样本元数据 CSV（可选）", value=str(metadata_default), help=metadata_help)
-    msconvert_default, msconvert_help = _parameter("data.msconvert", "")
-    msconvert = c2.text_input("msconvert.exe（兼容旧配置）", value=str(msconvert_default), help=msconvert_help)
+    msconvert = ""
     frame_default, frame_help = _parameter("data.frame_metadata", ["rt"])
     frame_metadata = st.multiselect("写入 obs 的帧元数据", ["rt", "ms_level", "native_id"], default=frame_default, help=frame_help)
-    st.caption("原始 frame_id 会强制写入 obs，不受此选项影响；MS2 及更高等级谱不会进入细胞提取。")
+    st.caption("细胞提取使用 MS1 数据，原始帧序号会自动保留。")
 
     st.subheader("质量轴与峰参数")
+    selected_inputs = [p.strip().strip('"') for p in input_path.splitlines() if p.strip()]
+    _acquisition_defaults(st, selected_inputs, "processing", {
+        "mz_min": "data.mz_min", "mz_max": "data.mz_max", "resolution": "data.resolution"})
     a, b = st.columns(2)
-    value, help_text = _parameter("data.mz_min", 100.0); processing_mz_min = a.number_input("处理 m/z 下限", 0.000001, 100000.0, float(value), help=help_text)
-    value, help_text = _parameter("data.mz_max", 1000.0); processing_mz_max = b.number_input("处理 m/z 上限", 0.000001, 100000.0, float(value), help=help_text)
+    _, help_text = _parameter("data.mz_min", 100.0); processing_mz_min = a.number_input("处理 m/z 下限", 0.000001, 100000.0, key="processing_mz_min", help=help_text)
+    _, help_text = _parameter("data.mz_max", 1000.0); processing_mz_max = b.number_input("处理 m/z 上限", 0.000001, 100000.0, key="processing_mz_max", help=help_text)
     a, b, c = st.columns(3)
     value, help_text = _parameter("data.ppm", 10.0); ppm = a.number_input("特征匹配 ppm", 0.01, 1000.0, float(value), help=help_text)
     value, help_text = _parameter("data.merge_ppm", 10.0); merge_ppm = b.number_input("文件间合并 ppm", 0.01, 1000.0, float(value), disabled=mode != "independent", help=help_text)
-    value, help_text = _parameter("data.resolution", 35000.0); resolution = c.number_input("分辨率 @ m/z 200", 100.0, 2_000_000.0, float(value), help=help_text)
+    _, help_text = _parameter("data.resolution", 35000.0); resolution = c.number_input("分辨率 @ m/z 200", 100.0, 2_000_000.0, key="processing_resolution", help=help_text)
     value, help_text = _parameter("data.resample_points", 5.0); points = a.number_input("每 FWHM 重采样点", 1.0, 50.0, float(value), help=help_text)
     value, help_text = _parameter("data.spectrum_snr", 10.0); spectrum_snr = b.number_input("总谱峰 SNR", 0.0, 1000.0, float(value), help=help_text)
     value, help_text = _parameter("data.prominence", 0.0); prominence = c.number_input("峰 prominence ratio（0=自动）", 0.0, 1.0, float(value), help=help_text)
@@ -693,7 +879,7 @@ def page_data():
         if not input_path:
             raise ValueError("请选择输入文件或目录")
         config = ProcessingConfig(
-            input_path=input_path,
+            input_path=selected_inputs if batch else input_path,
             output_path=output_path,
             reference_mz=parse_reference_mz(reference_text),
             reference_mode=reference_mode,
@@ -717,11 +903,13 @@ def page_data():
             frame_metadata=tuple(frame_metadata),
             create_qc=create_qc,
             msconvert_path=msconvert,
+            file_ranges=file_ranges,
         )
         return run_processing(config, progress_callback=progress)
 
     if st.button("开始峰提取", type="primary", use_container_width=True):
-        result = _execute(st, terminal, "CyESI 峰提取", process, "data")
+        result = _execute(st, terminal, "CyESI 峰提取", process, "data",
+                          on_success=lambda result: st.session_state.update(data=result[0], h5ad_path=str(result[1].resolve())))
         if result is not None:
             st.session_state.data = result[0]
             st.rerun()
@@ -730,25 +918,25 @@ def page_data():
 def _preview_source(st):
     if st.button("📄 选择用于预览的质谱文件"):
         _browse(st, "file", "preview_path")
-    current = Path(st.session_state.get("input_path", ""))
-    if current.is_dir():
-        files = sorted(
-            str(path) for path in current.iterdir()
-            if path.suffix.lower() in {".mzml", ".mzxml", ".raw"}
-        )
-        if files:
-            configured, help_text = _parameter("preview.directory_file", "")
-            selected_index = files.index(configured) if configured in files else 0
-            selected = st.selectbox("从当前输入目录选择", files, index=selected_index, help=help_text)
-            if not st.session_state.preview_path:
-                st.session_state.preview_path = selected
+    from scMM.file.acquisition import resolve_ms_files
+    paths = [p.strip().strip('"') for p in st.session_state.get("input_path", "").splitlines() if p.strip()]
+    files = [str(path) for path in resolve_ms_files(paths)]
+    if files:
+        configured, help_text = _parameter("preview.directory_file", "")
+        selected_index = files.index(configured) if configured in files else 0
+        selected = st.selectbox("从当前输入文件选择", files, index=selected_index, help=help_text)
+        if st.session_state.get("preview_selected_source") != selected:
+            st.session_state.preview_path = selected
+            st.session_state.preview_selected_source = selected
     return st.text_input("预览文件", key="preview_path", help=_parameter("preview.file", "")[1])
 
 
 def page_preview():
     import plotly.express as px
     import plotly.graph_objects as go
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     from scMM.analysis import cell_detection_preview, chromatogram_preview, spectrum_preview
     from scMM.workflows import parse_reference_mz
@@ -757,8 +945,11 @@ def page_preview():
     st.caption("查看 TIC、EIC、任意 MS1 扫描的质谱，以及与正式算法一致的细胞提取结果。")
     terminal = _terminal(st)
     path = _preview_source(st)
+    _acquisition_defaults(st, [path] if path else [], "cell_preview", {
+        "mz_min": "preview.processing_mz_min", "mz_max": "preview.processing_mz_max",
+        "resolution": "preview.resolution"})
     c1, c2 = st.columns(2)
-    value, help_text = _parameter("preview.msconvert", ""); msconvert = c1.text_input("msconvert.exe（兼容旧配置）", value=str(value), key="preview_msconvert", help=help_text)
+    msconvert = ""
     value, help_text = _parameter("preview.ppm", 10.0); ppm = c2.number_input("EIC ppm", 0.01, 1000.0, float(value), help=help_text)
 
     tic_tab, spectrum_tab, cell_tab, processed_tab = st.tabs(
@@ -784,6 +975,7 @@ def page_preview():
                     msconvert_path=msconvert or None,
                     progress_callback=progress,
                 ),
+                on_success=lambda result: st.session_state.update(preview_chrom=result[0]),
             )
             if result is not None:
                 st.session_state.preview_chrom = result[0]
@@ -851,8 +1043,15 @@ def page_preview():
     with spectrum_tab:
         value, help_text = _parameter("preview.scan", 0); scan = st.number_input("MS1 scan 序号", 0, 10_000_000, int(value), help=help_text)
         a, b = st.columns(2)
-        value, help_text = _parameter("preview.mz_min", 100.0); mz_min = a.number_input("m/z 下限", 0.0, 100000.0, float(value), help=help_text)
-        value, help_text = _parameter("preview.mz_max", 1000.0); mz_max = b.number_input("m/z 上限", 0.0, 100000.0, float(value), help=help_text)
+        settings = st.session_state.get("cell_preview_acquisition", {})
+        signature = st.session_state.get("cell_preview_acquisition_signature")
+        if (st.session_state.get("spectrum_acquisition_signature") != signature
+                or "spectrum_mz_min" not in st.session_state or "spectrum_mz_max" not in st.session_state):
+            st.session_state.spectrum_mz_min = float(settings.get("mz_min", _parameter("preview.mz_min", 100.)[0]))
+            st.session_state.spectrum_mz_max = float(settings.get("mz_max", _parameter("preview.mz_max", 1000.)[0]))
+            st.session_state.spectrum_acquisition_signature = signature
+        _, help_text = _parameter("preview.mz_min", 100.0); mz_min = a.number_input("m/z 下限", 0.0, 100000.0, key="spectrum_mz_min", help=help_text)
+        _, help_text = _parameter("preview.mz_max", 1000.0); mz_max = b.number_input("m/z 上限", 0.0, 100000.0, key="spectrum_mz_max", help=help_text)
         value, help_text = _parameter("preview.max_points", 10000); max_points = st.number_input("最大绘图点数（按 m/z 顺序采样）", 100, 100000, int(value), help=help_text)
         value, help_text = _parameter("preview.line_color", "#1f77b4"); line_color = st.color_picker("谱线颜色", str(value), help=help_text)
         if st.button("读取质谱"):
@@ -864,6 +1063,7 @@ def page_preview():
                     progress(0.2, "Loading raw-MS file"),
                     spectrum_preview(path, scan, msconvert_path=msconvert or None),
                 )[1],
+                on_success=lambda result: st.session_state.update(preview_spectrum=result),
             )
             if result is not None:
                 st.session_state.preview_spectrum = result
@@ -894,10 +1094,10 @@ def page_preview():
         value, help_text = _parameter("preview.feature_snr", 3.0); feature_snr = c.number_input("Feature SNR", 0.0, 1000.0, float(value), key="cell_preview_snr", help=help_text)
         value, help_text = _parameter("preview.baseline_window", 51); baseline = a.number_input("基线窗口", 3, 10001, int(value), step=2, key="cell_preview_baseline", help=help_text)
         value, help_text = _parameter("preview.noise_window", 51); noise = b.number_input("噪声窗口", 3, 10001, int(value), step=2, key="cell_preview_noise", help=help_text)
-        value, help_text = _parameter("preview.resolution", 35000.0); resolution = c.number_input("分辨率", 100.0, 2_000_000.0, float(value), key="cell_preview_resolution", help=help_text)
+        _, help_text = _parameter("preview.resolution", 35000.0); resolution = c.number_input("分辨率", 100.0, 2_000_000.0, key="cell_preview_resolution", help=help_text)
         d, e = st.columns(2)
-        value, help_text = _parameter("preview.processing_mz_min", 100.0); cell_mz_min = d.number_input("预览处理 m/z 下限", 0.000001, 100000.0, float(value), key="cell_preview_mz_min", help=help_text)
-        value, help_text = _parameter("preview.processing_mz_max", 1000.0); cell_mz_max = e.number_input("预览处理 m/z 上限", 0.000001, 100000.0, float(value), key="cell_preview_mz_max", help=help_text)
+        _, help_text = _parameter("preview.processing_mz_min", 100.0); cell_mz_min = d.number_input("预览处理 m/z 下限", 0.000001, 100000.0, key="cell_preview_mz_min", help=help_text)
+        _, help_text = _parameter("preview.processing_mz_max", 1000.0); cell_mz_max = e.number_input("预览处理 m/z 上限", 0.000001, 100000.0, key="cell_preview_mz_max", help=help_text)
         if st.button("运行细胞提取预览", type="primary"):
             result = _execute(
                 st,
@@ -917,6 +1117,7 @@ def page_preview():
                     baseline_window=baseline,
                     noise_window=noise,
                 ),
+                on_success=lambda result: st.session_state.update(preview_cells=result[0]),
             )
             if result is not None:
                 st.session_state.preview_cells = result[0]
@@ -1086,23 +1287,26 @@ def _cell_filter_controls(st, data):
     st.markdown("##### 细胞标签管理")
     active = list(data.uns.get("active_cell_filters", columns))
     active = [name for name in active if name in columns]
-    selected = st.multiselect(
-        "参与后续分析的细胞筛选标签",
-        columns,
-        default=active,
-        help="启用的标签按逻辑与组合；任一标签为 0 的细胞会在后续分析中被忽略。",
-    )
-    if selected != active:
-        data.set_active_cell_filters(selected)
     summary = pd.DataFrame(
         {
             "标签": columns,
-            "保留": [int(data.obs[name].sum()) for name in columns],
-            "忽略": [int((data.obs[name] == 0).sum()) for name in columns],
-            "启用": [name in selected for name in columns],
+            "值为 1": [int((data.obs[name] == 1).sum()) for name in columns],
+            "值为 0": [int((data.obs[name] == 0).sum()) for name in columns],
+            "启用筛选": [name in active for name in columns],
         }
     )
-    st.dataframe(summary, hide_index=True, use_container_width=True)
+    edited = st.data_editor(
+        summary, hide_index=True, use_container_width=True,
+        disabled=["标签", "值为 1", "值为 0"],
+        column_config={"启用筛选": st.column_config.CheckboxColumn(
+            "启用筛选", help="启用后，该标签值为 0 的细胞在后续分析中被忽略。关闭后标签用于标记与分组。")},
+        key=f"cell_filter_table_{id(data)}_{tuple(columns)}_{tuple(active)}",
+    )
+    selected = edited.loc[edited["启用筛选"], "标签"].tolist()
+    if selected != active:
+        data.set_active_cell_filters(selected)
+        st.rerun()
+    st.caption("勾选“启用筛选”后按标签筛选细胞，多个启用标签按逻辑与组合。关闭筛选时保留 0/1 标记，可用于分组和上色。")
     restore = st.selectbox("选择要还原的细胞标签", columns, key="restore_cell_filter")
     if st.button("将该标签全部还原为 1", key="restore_cell_filter_button"):
         data.restore_cell_filter(restore)
@@ -1141,7 +1345,9 @@ def _feature_filter_controls(st, data):
 
 def page_preprocess():
     import plotly.express as px
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     from scMM.analysis import quality_metrics
 
@@ -1154,7 +1360,7 @@ def page_preprocess():
         return
     data.ensure_matrix_layers()
     st.subheader("归一化与标准化")
-    st.caption(f"输入层：{data.uns['active_layer']}。原始 raw 层保留；已有低维坐标保持原结果，切换数据层后可重新运行降维。")
+    st.caption(f"当前数据层：{data.uns['active_layer']}。切换后可重新运行降维。")
     options = ["total", "max", "quantile", "pqn", "zscore", "log", "minmax"]
     index, help_text = _choice("preprocess.normalize_method", options); method = st.selectbox("方法", options, index=index, help=help_text)
     a, b, c = st.columns(3)
@@ -1162,7 +1368,7 @@ def page_preprocess():
     index, help_text = _choice("preprocess.axis", [0, 1]); axis = b.selectbox("Axis", [0, 1], index=index, help=help_text)
     value, help_text = _parameter("preprocess.log_pseudo", 1e-6); pseudo = c.number_input("Log pseudo", value=float(value), format="%.8g", help=help_text)
     index, help_text = _choice("preprocess.pqn_reference", ["median", "mean"]); pqn_reference = a.selectbox("PQN reference", ["median", "mean"], index=index, help=help_text)
-    layer_name = st.text_input("归一化/标准化输出 layer 名", value=f"normalized_{method}", key=f"normalize_output_{method}", help="同名层已存在时自动追加编号，保留之前的结果。")
+    layer_name = st.text_input("归一化结果数据层名称", value=f"normalized_{method}", key=f"normalize_output_{method}", help="同名层已存在时自动追加编号，保留之前的结果。")
     if st.button("应用归一化与标准化", type="primary"):
         params = {"total": {"scale": scale}, "zscore": {"axis": axis}, "minmax": {"axis": axis}, "log": {"pseudo": pseudo}, "pqn": {"reference": pqn_reference}}.get(method, {})
         result = _execute(st, terminal, "归一化与标准化", lambda progress: (progress(0.15, "Preparing selected layer"), data.normalize(method, layer_key=layer_name, **params), progress(0.9, "Saving output layer"))[1], "preprocess")
@@ -1173,7 +1379,7 @@ def page_preprocess():
     a, b = st.columns(2)
     value, help_text = _parameter("preprocess.knn_neighbors", 5); neighbors = a.number_input("KNN 邻居", 1, 100, int(value), help=help_text)
     value, help_text = _parameter("preprocess.constant_fill", 0.0); fill = b.number_input("Constant 填充值", value=float(value), help=help_text)
-    impute_layer = st.text_input("插补输出 layer 名", value=f"imputed_{method}", key=f"impute_output_{method}")
+    impute_layer = st.text_input("插补结果数据层名称", value=f"imputed_{method}", key=f"impute_output_{method}")
     if st.button("应用插补"):
         kwargs = {"n_neighbors": neighbors} if method == "knn" else ({"fill_value": fill} if method == "constant" else {})
         result = _execute(st, terminal, "缺失值插补", lambda progress: (progress(0.1, "Fitting imputer"), data.impute(method, layer_key=impute_layer, **kwargs), progress(0.9, "Saving imputed layer"))[1], "preprocess")
@@ -1186,7 +1392,7 @@ def page_preprocess():
         result = _execute(st, terminal, "异常细胞检测", lambda progress: (progress(0.15, "Fitting Isolation Forest"), data.remove_outlier(key=_safe_filter_suffix(isolation_key, "isolation_forest"), contamination=contamination, random_state=42), progress(0.9, "Writing uint8 obs label"))[1], "preprocess")
         if result is not None:
             column = f"cell_keep_{_safe_filter_suffix(isolation_key, 'isolation_forest')}"
-            terminal.write(f"Tagged {(data.obs[column] == 0).sum()} cells in obs[{column!r}]")
+            terminal.write(f"已标记 {(data.obs[column] == 0).sum()} 个细胞。")
             st.rerun()
 
     coordinate_options = _gate_coordinates(data)
@@ -1229,7 +1435,7 @@ def page_preprocess():
             gate_frame["density"] = point_density(gate_frame.x, gate_frame.y, smoothing=smoothing)
             gate_frame = gate_frame.sort_values("density")
             color_column = "density"
-            st.caption("颜色表示当前坐标平面上的二维点密度：二维直方图经高斯核平滑，再插值到每个细胞；高密度点最后绘制。")
+            st.caption("颜色表示细胞密度，便于识别密集区域和离群点。")
         index, help_text = _choice("discovery.color_scale", ["linear", "log10", "symlog"])
         gate_scale = st.selectbox("圈门伪色 colorbar 尺度", ["linear", "log10", "symlog"], index=index,
                                  disabled=color_column == "status", help=help_text, key="gate_color_scale")
@@ -1273,7 +1479,8 @@ def page_preprocess():
             xaxis_title=x_label,
             yaxis_title=y_label,
             meta={"scmm_cmap": gate_cmap, "scmm_color_scale": gate_scale if color_column != "status" else "linear",
-                  "scmm_color_label": color_column, "scmm_linthresh": gate_threshold},
+                  "scmm_color_label": color_column, "scmm_linthresh": gate_threshold,
+                  "scmm_plot": "cell_gate"},
         )
         from scMM.plot.interaction import constrain_zoom
         constrain_zoom(gate_figure)
@@ -1284,12 +1491,13 @@ def page_preprocess():
             on_select="rerun",
             selection_mode=("lasso", "box", "points"),
         )
-        _plotly_with_export(st, gate_figure, "cell_gate", render=False)
         selected_cells = _gate_selected_cells(
             selection,
             gate_frame["cell_position"].to_numpy(dtype=int),
         )
-        st.caption(f"当前圈中 {len(selected_cells)} 个细胞。可使用套索、矩形框或点选。")
+        selected_fraction = len(selected_cells) / data.n_obs if data.n_obs else 0.0
+        st.caption(f"选定细胞：{len(selected_cells)} / {data.n_obs}（{selected_fraction:.2%}，占数据集总细胞数）。可使用套索、矩形框或点选。")
+        _plotly_with_export(st, gate_figure, "cell_gate", render=False)
         a, b = st.columns(2)
         configured, gate_help = _parameter("preprocess.gate_label", "manual_gate"); gate_name = a.text_input("圈门标签名", value=str(configured), help=gate_help)
         mode_options = ["正选：圈中细胞标记为 0", "负选：圈外细胞标记为 0"]
@@ -1311,10 +1519,11 @@ def page_preprocess():
                 else:
                     keep[:] = 0
                     keep[selected_cells] = 1
-                column = data.set_cell_filter(
-                    _safe_filter_suffix(gate_name, "manual_gate"), keep
-                )
-                terminal.write(f"Gate written to obs[{column!r}]")
+                name = _safe_filter_suffix(gate_name, "manual_gate")
+                column = name if name.startswith(data.CELL_FILTER_PREFIX) else f"{data.CELL_FILTER_PREFIX}{name}"
+                active = list(data.uns.get("active_cell_filters", data.cell_filter_columns()))
+                column = data.set_cell_filter(name, keep, enabled=column in active)
+                terminal.write("细胞标签已保存。")
                 st.rerun()
 
     _cell_filter_controls(st, data)
@@ -1330,13 +1539,13 @@ def page_preprocess():
     configured, threshold_help = _parameter("preprocess.detection_threshold", 0.1); threshold = c.number_input("最低检出率", 0.0, 1.0, float(configured), step=0.01, help=threshold_help)
     configured, label_help = _parameter("preprocess.detection_label", "detection_rate"); feature_key = st.text_input("特征筛选标签名", value=str(configured), help=label_help)
     if st.button("计算检出率并写入特征标签"):
-        result = data.label_features_by_detection(
-            threshold,
-            source_file=source_file,
-            key=_safe_filter_suffix(feature_key, "detection_rate"),
-        )
-        terminal.write(f"Feature detection filter written to var[{result[0]!r}]")
-        st.rerun()
+        result = _execute(st, terminal, "特征检出率筛选", lambda progress: (
+            progress(.1, "计算特征检出率"),
+            data.label_features_by_detection(threshold, source_file=source_file,
+                                             key=_safe_filter_suffix(feature_key, "detection_rate")))[1])
+        if result is not None:
+            terminal.write("特征筛选结果已保存。")
+            st.rerun()
     _feature_filter_controls(st, data)
 
     st.subheader("交互式 QC")
@@ -1356,7 +1565,9 @@ def page_preprocess():
 
 
 def page_discovery():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     st.header("降维、聚类与轨迹分析")
     _pipeline_status(st)
@@ -1406,8 +1617,8 @@ def page_discovery():
                 f"{method.upper()} 降维",
                 lambda progress: (
                     progress(0.1, "Preparing representation"),
-                    _engine(st).reduce_dimension(method, use_rep=use_rep, n_components=components, scale=scale, random_state=seed, store_key=store_key, **params),
-                    progress(0.92, f"Writing obsm[{store_key!r}]"),
+                    _engine(data).reduce_dimension(method, use_rep=use_rep, n_components=components, scale=scale, random_state=seed, store_key=store_key, **params),
+                    progress(0.92, "保存降维结果"),
                 )[1],
                 "embedding",
             )
@@ -1426,9 +1637,9 @@ def page_discovery():
         if st.button("运行聚类并写入 obs", type="primary"):
             kwargs = ({"n_clusters": cluster_count} if method in {"kmeans", "agglomerative"} else ({"eps": eps, "min_samples": min_samples} if method == "dbscan" else {"n_neighbors": graph_neighbors, "resolution": resolution}))
             use_rep = None if representation == "当前 X（所选 layer）" else representation
-            result = _execute(st, terminal, f"{method} 聚类", lambda progress: (progress(0.1, "Preparing graph / matrix"), _engine(st).cluster_cells(method, use_rep=use_rep, key_added=key_added, random_state=seed, **kwargs), progress(0.9, f"Writing obs[{key_added!r}]"))[1], "cluster")
+            result = _execute(st, terminal, f"{method} 聚类", lambda progress: (progress(0.1, "Preparing graph / matrix"), _engine(data).cluster_cells(method, use_rep=use_rep, key_added=key_added, random_state=seed, **kwargs), progress(0.9, "保存细胞标签"))[1], "cluster")
             if result is not None:
-                terminal.write(f"Generated {result.nunique()} clusters in obs[{key_added!r}]")
+                terminal.write(f"已识别 {result.nunique()} 个聚类。")
                 st.rerun()
     with trajectory_tab:
         methods = {
@@ -1455,10 +1666,10 @@ def page_discovery():
             options = sorted(data.obs[root_obs].dropna().astype(str).unique()); configured, help_text = _parameter("discovery.root_value", ""); root_value = st.selectbox("Root value", options, index=options.index(configured) if configured in options else 0, help=help_text)
         if st.button("运行轨迹并写入 obs", type="primary"):
             use_rep = None if representation == "当前 X（所选 layer）" else representation
-            result = _execute(st, terminal, method_label, lambda progress: (progress(0.1, "Building trajectory graph"), _engine(st).trajectory(method, use_rep=use_rep, key_added=key_added, root_cell=root_cell, root_obs=root_obs, root_value=root_value, n_neighbors=neighbors, n_components=components, cluster_key=cluster_key), progress(0.92, f"Writing obs[{key_added!r}]"))[1], "trajectory")
+            result = _execute(st, terminal, method_label, lambda progress: (progress(0.1, "Building trajectory graph"), _engine(data).trajectory(method, use_rep=use_rep, key_added=key_added, root_cell=root_cell, root_obs=root_obs, root_value=root_value, n_neighbors=neighbors, n_components=components, cluster_key=cluster_key), progress(0.92, "保存细胞标签"))[1], "trajectory")
             if result is not None:
-                terminal.write(f"Pseudotime written to obs[{key_added!r}]")
-                if method == "diffusion_pseudotime": terminal.write("Diffusion components written to obsm['X_diffmap']")
+                terminal.write("伪时间已保存。")
+                if method == "diffusion_pseudotime": terminal.write("扩散成分已保存。")
                 st.rerun()
     with plot_tab:
         embeddings = list(data.obsm.keys())
@@ -1526,9 +1737,9 @@ def _var_labels(data, feature_ids, key):
                        for identifier, value in zip(identifiers, values)])
 
 
-def _volcano_selection_changed(st, plot_key, feature_ids, visible, mode):
+def _volcano_selection_changed(st, plot_key, feature_ids, visible, mode, *, state_key="volcano_annotation_state"):
     from scMM.plot.volcano import selected_features
-    state = st.session_state.volcano_annotation_state
+    state = st.session_state[state_key]
     chosen = selected_features(st.session_state.get(plot_key, {}), feature_ids)
     previous = state["selection"]
     added = [feature for feature in chosen if feature not in previous]
@@ -1661,12 +1872,18 @@ def _render_differential_plots(st, data):
         test_frame.loc[finite, "fdr"] = _bh_adjust(test_frame.loc[finite, "p_value"])
     points = "all" if show_points else False
     if plot_type == "小提琴图":
-        distribution = px.violin(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3, box=True, points=points, color_discrete_sequence=px.colors.qualitative.Plotly)
+        distribution = px.violin(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3, box=True, points=points, color_discrete_sequence=px.colors.qualitative.Plotly, custom_data=["feature", "group"])
     else:
-        distribution = px.box(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3, points=points, color_discrete_sequence=px.colors.qualitative.Plotly)
+        distribution = px.box(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3, points=points, color_discrete_sequence=px.colors.qualitative.Plotly, custom_data=["feature", "group"])
     _match_distribution_colors(distribution)
     distribution.update_yaxes(matches=None)
     distribution.update_layout(height=max(460, 300 * ((len(selected) + 2) // 3)), showlegend=False)
+    colors, significance_mode = _distribution_controls(st, list(dict.fromkeys(long.group)), "diff_distribution")
+    _style_distribution(distribution, colors)
+    from scMM.plot.distribution import annotate_distribution
+    comparisons = [dict(feature=row["feature"], groups=[str(context["group_a"]), str(context["group_b"])],
+                        p_value=row["p_value"]) for row in test_rows]
+    annotate_distribution(distribution, comparisons, significance_mode)
     _plotly_with_export(st, distribution, "differential_distribution")
     st.caption("统计检验针对当前图中数据重新计算；选择“删除零值”时样本量会随特征变化。")
     st.dataframe(test_frame, use_container_width=True, hide_index=True)
@@ -1674,7 +1891,7 @@ def _render_differential_plots(st, data):
 
 def _file_label_tool(st, data):
     if "source_file" not in data.obs:
-        st.info("文件打标需要 obs['source_file']。")
+        st.info("当前数据缺少源文件信息，请重新导入原始文件。")
         return
     with st.expander("按质谱文件赋予实验标签", expanded=False):
         column = st.text_input("写入 obs 的列名", value="experimental_group", key="file_label_column")
@@ -1695,7 +1912,7 @@ def _file_label_tool(st, data):
                 data.obs[column] = mapped.where(mapped.notna(), existing)
                 for source, value in mapping.items():
                     data.uns.setdefault("files", {}).setdefault(source, {})[column] = str(value)
-                st.success(f"已写入 obs[{column!r}]，对应 {int(mapped.notna().sum())} 个细胞。")
+                st.success(f"已为 {int(mapped.notna().sum())} 个细胞保存标签 {column}。")
 
 
 def _match_distribution_colors(figure):
@@ -1707,6 +1924,37 @@ def _match_distribution_colors(figure):
                 trace.marker.color = color
                 trace.fillcolor = color
     return figure
+
+
+def _distribution_controls(st, groups, key, *, colors=None, mode="stars"):
+    import plotly.express as px
+
+    a, b = st.columns(2)
+    show = a.checkbox("显示统计检验标注", value=mode != "none", key=f"{key}_statistics")
+    label_mode = b.selectbox("显著性表示", ["星号", "p 值"], index=int(mode == "p"), key=f"{key}_significance",
+                            help="星号按原始 p 值标注：* ≤ 0.05，** ≤ 0.01，*** ≤ 0.001，**** ≤ 0.0001；ns 表示 p > 0.05。")
+    styles = {}
+    with st.expander("分组形状与散点颜色"):
+        for index, group in enumerate(groups):
+            defaults = (colors or {}).get(group, {})
+            default = px.colors.qualitative.Plotly[index % len(px.colors.qualitative.Plotly)]
+            a, b = st.columns(2)
+            shape = a.color_picker(f"{group} · 形状", defaults.get("shape", default), key=f"{key}_shape_{group}")
+            points = b.color_picker(f"{group} · 散点", defaults.get("points", default), key=f"{key}_points_{group}")
+            styles[group] = dict(shape=shape, points=points)
+    return styles, ("stars" if label_mode == "星号" else "p") if show else "none"
+
+
+def _style_distribution(figure, colors):
+    for trace in figure.data:
+        style = colors.get(trace.name, {})
+        if trace.type in {"violin", "box"}:
+            trace.update(fillcolor=style["shape"], line_color=style["shape"], marker_color=style["points"])
+            if trace.type == "violin":
+                trace.spanmode = "hard"
+        elif trace.type in {"scatter", "scattergl"}:
+            trace.marker.color = style["points"]
+    figure.update_layout(meta=dict(figure.layout.meta or {}, scmm_distribution_colors=colors))
 
 
 def _targeted_analysis(st, data, group_key):
@@ -1729,6 +1977,11 @@ def _targeted_analysis(st, data, group_key):
     if not selected or len(groups) < 2:
         st.info("请选择特征及至少两个实验组。")
         return
+    from itertools import combinations
+    extra_pairs = st.multiselect("附加两两组间检验", list(combinations(groups, 2)),
+                                 format_func=lambda pair: f"{pair[0]} vs {pair[1]}", key="target_extra_pairs")
+    plot_type = st.selectbox("靶向分布图类型", ["小提琴图", "箱线图"], key="target_plot_type")
+    colors, significance_mode = _distribution_controls(st, groups, "target_distribution")
     keep = data.cell_keep_mask() & data.obs[group_key].notna().to_numpy() & data.obs[group_key].astype(str).isin(groups).to_numpy()
     positions = data.var_names.get_indexer(selected)
     matrix = _dense(data.X[np.flatnonzero(keep)][:, positions])
@@ -1777,17 +2030,30 @@ def _targeted_analysis(st, data, group_key):
         else:
             st.info("当前两个分布的有效数据不足以计算 p 值，请检查组别、零值设置和样本数。")
     rows = []
+    comparisons = []
     for feature in selected:
         samples = [long.loc[(long.feature == feature) & (long.group == group), "intensity"] for group in pair]
         statistic, pvalue = compare_groups(samples, method) if len(pair) >= 2 else (np.nan, np.nan)
         rows.append({"feature": feature, "test": method, "groups": " / ".join(pair), "statistic": statistic, "p_value": pvalue})
+        comparisons.append(dict(feature=feature, groups=pair, p_value=pvalue,
+                                prefix=f"{method}: " if len(pair) > 2 else ""))
+        for group_left, group_right in extra_pairs:
+            if pairwise and set(pair) == {group_left, group_right} and method == compare_method:
+                continue
+            samples = [long.loc[(long.feature == feature) & (long.group == group), "intensity"]
+                       for group in (group_left, group_right)]
+            statistic, pvalue = compare_groups(samples, compare_method)
+            rows.append(dict(feature=feature, test=compare_method, groups=f"{group_left} / {group_right}",
+                             statistic=statistic, p_value=pvalue))
+            comparisons.append(dict(feature=feature, groups=[group_left, group_right], p_value=pvalue))
     result = pd.DataFrame(rows)
     result["fdr"] = np.nan
     finite = result.p_value.notna()
     if finite.any():
         result.loc[finite, "fdr"] = _bh_adjust(result.loc[finite, "p_value"])
-    figure = px.violin(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3,
-                       box=True, points=False,
+    plotter = px.violin if plot_type == "小提琴图" else px.box
+    figure = plotter(long, x="group", y="intensity", color="group", facet_col="feature", facet_col_wrap=3,
+                       **({"box": True} if plot_type == "小提琴图" else {}), points=False,
                        color_discrete_sequence=px.colors.qualitative.Plotly,
                        category_orders={"group": groups, "feature": selected}, custom_data=["feature", "group"])
     _match_distribution_colors(figure)
@@ -1799,19 +2065,17 @@ def _targeted_analysis(st, data, group_key):
                                customdata=trace.customdata, name=trace.name, showlegend=False,
                                hovertemplate="%{customdata[0]} · %{customdata[1]}<br>%{y}<extra></extra>")
     figure.update_yaxes(matches=None)
-    for feature, pvalue in zip(selected, result.p_value):
-        traces = [trace for trace in figure.data if trace.customdata is not None and len(trace.customdata) and trace.customdata[0][0] == feature]
-        if traces:
-            trace = traces[0]
-            figure.add_annotation(x=.5, y=1.02, xref=f"{trace.xaxis or 'x'} domain", yref=f"{trace.yaxis or 'y'} domain",
-                                  text=f"{method}: p={pvalue:.3g}", showarrow=False)
     if comparison is not None:
-        for feature in dict.fromkeys([feature_a, feature_b]):
-            trace = next((trace for trace in figure.data if trace.customdata is not None and len(trace.customdata) and trace.customdata[0][0] == feature), None)
-            if trace is not None:
-                figure.add_annotation(x=.5, y=.94, xref=f"{trace.xaxis or 'x'} domain", yref=f"{trace.yaxis or 'y'} domain",
-                                      text=f"{compare_method}: A vs B, p={comparison['p_value']:.3g}", showarrow=False,
-                                      bgcolor="rgba(255,255,255,.8)")
+        if feature_a == feature_b:
+            if not any(row["feature"] == feature_a and set(row["groups"]) == {group_a, group_b}
+                       and row["p_value"] == comparison["p_value"] for row in comparisons):
+                comparisons.append(dict(feature=feature_a, groups=[group_a, group_b], p_value=comparison["p_value"]))
+        else:
+            for feature, group in [(feature_a, group_a), (feature_b, group_b)]:
+                comparisons.append(dict(feature=feature, groups=[group], p_value=comparison["p_value"], prefix="A vs B: "))
+    _style_distribution(figure, colors)
+    from scMM.plot.distribution import annotate_distribution
+    annotate_distribution(figure, comparisons, significance_mode)
     figure.update_layout(title="靶向特征分组比较", height=max(520, 350 * ((len(selected) + 2) // 3)), showlegend=True)
     # Point selection identifies feature/group combinations directly on the plot.
     from scMM.plot.interaction import constrain_zoom
@@ -1845,6 +2109,8 @@ def _targeted_analysis(st, data, group_key):
         "两个特征配相同实验组可比较该组中两个特征的强度。③ 图选方式：打开散点，按住 Shift 连续点选两个分布中的"
         "任意细胞点，或使用框选/套索圈出两个分布，再点击“将图选的两个分布填入比较栏”，随后运行比较。"
         "检验使用所选分布的全部有效细胞；零值是否纳入由“靶向分析使用零值”决定。跨特征比较请使用可比较的强度尺度。"
+        "“附加两两组间检验”可添加多组比较，使用“两分布检验方法”指定的检验。星号对应原始 p 值："
+        "* ≤ 0.05，** ≤ 0.01，*** ≤ 0.001，**** ≤ 0.0001；ns 表示 p > 0.05。"
     )
 
 
@@ -1893,9 +2159,10 @@ def _heatmap_ui(st, data, kind):
         correlation_method = b.selectbox("相关系数", ["pearson", "spearman", "kendall"], disabled=kind != "correlation", key=f"{kind}_correlation")
         annotate = st.checkbox("在格内显示 R²" if kind == "file_qc" else "在格内显示数值", value=kind == "file_qc", key=f"{kind}_annotate")
         if kind == "file_qc":
-            st.caption("按来源文件聚合有效细胞，用聚合后的特征强度向量计算文件间 Pearson r，并显示 R²=r²。不同实验标签混在同一文件时，标签显示 mixed。")
+            st.caption("按来源文件聚合有效细胞，计算文件间的 Pearson 相关系数，并显示 R²=r²。不同实验标签混在同一文件时，标签显示 mixed。")
         if st.button("绘制热图", key=f"{kind}_run"):
-            try:
+            def build_heatmap(progress):
+                progress(.1, "准备热图矩阵")
                 if not features:
                     raise ValueError("请至少选择一个特征。")
                 matrix, sample_labels = expression_matrix(data, features, pseudobulk=sample_mode != "单个细胞" or kind == "file_qc",
@@ -1904,7 +2171,6 @@ def _heatmap_ui(st, data, kind):
                     indices = np.sort(np.random.default_rng(42).choice(len(matrix), size=cell_limit, replace=False))
                     matrix = matrix.iloc[indices]
                     sample_labels = sample_labels.reindex(matrix.index)
-                    st.caption(f"热图使用固定种子抽取的 {cell_limit} 个有效细胞；完整数据保持原样。")
                 if transform == "log1p":
                     if (matrix.to_numpy() < 0).any():
                         raise ValueError("log1p 表达热图使用非负强度，请选择 none 或 feature z-score。")
@@ -1927,15 +2193,16 @@ def _heatmap_ui(st, data, kind):
                     row_labels = column_labels = sample_labels.reindex(values.index).to_numpy()
                     show_rows = show_columns = show_samples
                     value_range = (0, 1)
+                progress(.65, "层次聚类与热图布局")
                 figure = heatmap_figure(values, title=titles[kind] + (" · R²" if kind == "file_qc" else ""), row_labels=row_labels, column_labels=column_labels,
                                         show_rows=show_rows, show_columns=show_columns,
                                         cluster_rows=cluster_rows, cluster_columns=cluster_columns,
                                         method=method, metric="euclidean" if method == "ward" else metric,
                                         cmap=cmap, annotate=annotate, value_range=value_range)
                 figure.update_layout(meta={"scmm_cmap": cmap})
-                st.session_state[f"{kind}_heatmap_result"] = (figure, values)
-            except ValueError as exc:
-                st.error(str(exc))
+                return figure, values
+            _execute(st, _terminal(st), titles[kind], build_heatmap,
+                     on_success=lambda result: st.session_state.update({f"{kind}_heatmap_result": result}))
         result = st.session_state.get(f"{kind}_heatmap_result")
         if result is not None:
             figure, values = result
@@ -1985,6 +2252,93 @@ def _network_plot(st, data):
     _plotly_with_export(st, figure, "feature_network")
 
 
+def _correlation_distribution_ui(st, data):
+    from scMM.analysis.statistics import feature_correlations
+    from scMM.plot.correlation import correlation_figure
+    from scMM.plot.volcano import labelled_features
+    from scMM.plot.interaction import constrain_zoom
+
+    st.subheader("一个变量与所有特征的相关系数分布")
+    active_features = set(data.var_names[data.feature_keep_mask()])
+    coordinates = {name: descriptor for name, descriptor in _gate_coordinates(data).items()
+                   if descriptor[0] == "obs" or (descriptor[0] == "feature" and descriptor[1] in active_features)}
+    if not coordinates:
+        return
+    a, b, c = st.columns(3)
+    options = list(coordinates)
+    first_feature = next((i for i, descriptor in enumerate(coordinates.values()) if descriptor[0] == "feature"), 0)
+    index, help_text = _choice("analysis.correlation_target", options, first_feature)
+    target = a.selectbox("相关分布的目标 obs / 特征", options, index=index, key="corr_target", help=help_text)
+    methods = ["pearson", "spearman", "kendall"]
+    index, help_text = _choice("analysis.distribution_correlation_method", methods)
+    method = b.selectbox("分布图相关系数", methods, index=index, key="corr_method", help=help_text)
+    value, help_text = _parameter("analysis.correlation_include_zeros", True)
+    include_zeros = c.checkbox("分布图计算使用零值", value, key="corr_zeros", help=help_text)
+    if st.button("计算所有特征的相关系数", key="corr_compute"):
+        descriptor = coordinates[target]
+        values = _gate_values(data, descriptor)
+        _execute(st, _terminal(st), "逐特征相关性", lambda progress: feature_correlations(
+            data, values, method=method, include_zeros=include_zeros,
+            exclude_feature=descriptor[1] if descriptor[0] == "feature" else None, progress=progress),
+            on_success=lambda result: st.session_state.update(correlation_distribution_result={
+                "data_id": id(data), "result": result, "target": target, "method": method,
+                "layer": data.uns.get("active_layer", "X")}))
+    stored = st.session_state.get("correlation_distribution_result")
+    if not stored or stored["data_id"] != id(data):
+        return
+    result = stored["result"]
+    valid = result.loc[np.isfinite(result.correlation)].copy()
+    if valid.empty:
+        st.info("当前细胞中没有可计算相关系数的特征，需要至少 3 个有效观测且变量具有变化。")
+        return
+    st.caption(f"目标 {stored['target']}，数据层 {stored['layer']}。可计算 {len(valid)} 个特征，"
+               f"样本不足或常量特征 {len(result) - len(valid)} 个。")
+    a, b, c = st.columns(3)
+    label_options = ["feature_id", *data.var.columns.astype(str)]
+    index, help_text = _choice("analysis.correlation_var_label", label_options)
+    label_key = a.selectbox("相关图名称使用的 var 字段", label_options, index=index, key="corr_var_label", help=help_text)
+    value, help_text = _parameter("analysis.correlation_label_count", 10)
+    maximum = b.number_input("相关图最大标注数量", 0, 500, int(value), key="corr_label_count", help=help_text)
+    value, help_text = _parameter("analysis.correlation_label_size", 10.)
+    size = c.number_input("相关图标注字号（pt）", 6., 48., float(value), key="corr_label_size", help=help_text)
+    modes = ["自动＋手动", "仅手动", "仅自动"]
+    index, help_text = _choice("analysis.correlation_label_mode", modes)
+    mode = a.selectbox("相关图标注方式", modes, index=index, key="corr_label_mode", help=help_text)
+    chosen = st.multiselect("指定标注的特征", valid.feature_id.tolist(),
+                            format_func=lambda feature: str(_var_labels(data, [feature], label_key)[0]),
+                            key=f"corr_named_features_{id(result)}")
+    scope = (id(data), id(result))
+    state_key = "correlation_annotation_state"
+    state = st.session_state.get(state_key, {})
+    if state.get("scope") != scope:
+        state = dict(scope=scope, overrides={}, selection=[])
+        st.session_state[state_key] = state
+    c.button("重置相关图手动标注", on_click=state["overrides"].clear, key="corr_reset")
+    ranked = valid.iloc[np.argsort(-np.abs(valid.correlation.to_numpy()), kind="stable")].feature_id.tolist()
+    automatic = list(dict.fromkeys([*chosen, *(ranked if mode != "仅手动" else [])]))
+    overrides = {**{feature: True for feature in chosen}, **state["overrides"]}
+    visible = labelled_features(automatic, overrides, int(maximum), mode)
+    valid["label"] = ""
+    mask = valid.feature_id.isin(visible)
+    valid.loc[mask, "label"] = _var_labels(data, valid.loc[mask, "feature_id"], label_key)
+    figure = correlation_figure(valid, valid.label, target=stored["target"], method=stored["method"], annotation_size=size)
+    signature = (tuple(valid.label), size)
+    if state.get("plot_signature") != signature:
+        state["selection"] = []
+        state["plot_signature"] = signature
+    figure.update_layout(clickmode="event+select", dragmode="pan", uirevision=str(scope))
+    figure.update_traces(selectedpoints=[], selected=dict(marker=dict(opacity=.8)), unselected=dict(marker=dict(opacity=.8)))
+    constrain_zoom(figure)
+    plot_key = f"corr_distribution_plot_{id(result)}"
+    ids = valid.feature_id.astype(str).tolist()
+    st.plotly_chart(figure, use_container_width=True, key=plot_key, selection_mode="points",
+                    on_select=lambda: _volcano_selection_changed(st, plot_key, ids, visible, mode, state_key=state_key))
+    _plotly_with_export(st, figure, "correlation_distribution", render=False)
+    st.caption("点击点可切换名称标注，Shift＋点击可多选，也可在上方指定特征。背景及百分比表示正、负相关特征的占比。")
+    st.download_button("下载逐特征相关系数 CSV", result.to_csv(index=False).encode("utf-8-sig"),
+                       "SCMM_feature_correlations.csv", "text/csv", key="corr_csv")
+
+
 def _association_ui(st, data):
     import plotly.graph_objects as go
     from scMM.analysis.statistics import numeric_association
@@ -2008,11 +2362,10 @@ def _association_ui(st, data):
         mask = data.cell_keep_mask()
         if not include_zeros:
             mask &= (x != 0) & (y != 0)
-        try:
-            result = numeric_association(x[mask], y[mask], permutations=permutations, confidence=confidence, seed=seed)
-            st.session_state.association_result = (xname, yname, result)
-        except ValueError as exc:
-            st.error(str(exc))
+        _execute(st, _terminal(st), "相关性与置换检验", lambda progress: (
+            progress(.1, "拟合与置换检验"),
+            numeric_association(x[mask], y[mask], permutations=permutations, confidence=confidence, seed=seed))[1],
+            on_success=lambda result: st.session_state.update(association_result=(xname, yname, result)))
     stored = st.session_state.get("association_result")
     if stored is None:
         return
@@ -2135,7 +2488,9 @@ def _render_supervised_plots(st, analyzer):
 
 
 def page_analysis():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     from scMM.analysis import SupervisedAnalyzer
 
@@ -2161,14 +2516,17 @@ def page_analysis():
         test_index, test_help = _choice("analysis.diff_test", ["mannwhitney", "welch"])
         test = st.selectbox("检验", ["mannwhitney", "welch"], index=test_index, help=test_help)
         if st.button("差异分析（BH-FDR）", type="primary", disabled=mode == "靶向差异分析"):
-            result = _execute(st, terminal, "差异分析", lambda progress: (progress(0.1, "Testing features"), _engine(st).differential_features(group_key, group_a, group_b, method=test, include_zeros=include_zeros), progress(0.92, "Applying BH-FDR"))[1], "analysis")
+            context = {"group_key": group_key, "group_a": group_a, "group_b": group_b, "test": test, "include_zeros": include_zeros}
+            result = _execute(st, terminal, "差异分析", lambda progress: (progress(0.1, "Testing features"), _engine(data).differential_features(group_key, group_a, group_b, method=test, include_zeros=include_zeros), progress(0.92, "Applying BH-FDR"))[1], "analysis",
+                              on_success=lambda result: st.session_state.update(result_table=result, differential_result=result, differential_context=context))
             if result is not None:
                 st.session_state.result_table = result
                 st.session_state.differential_result = result
                 st.session_state.differential_context = {"group_key": group_key, "group_a": group_a, "group_b": group_b, "test": test, "include_zeros": include_zeros}
                 st.rerun()
         if st.button("聚类 Marker 分析", disabled=mode == "靶向差异分析"):
-            result = _execute(st, terminal, "Marker 分析", lambda progress: (progress(0.1, "Comparing clusters"), _engine(st).marker_features(group_key, method=test, include_zeros=include_zeros), progress(0.92, "Combining marker tables"))[1], "analysis")
+            result = _execute(st, terminal, "Marker 分析", lambda progress: (progress(0.1, "Comparing clusters"), _engine(data).marker_features(group_key, method=test, include_zeros=include_zeros), progress(0.92, "Combining marker tables"))[1], "analysis",
+                              on_success=lambda result: st.session_state.update(result_table=result))
             if result is not None: st.session_state.result_table = result; st.rerun()
         if mode == "靶向差异分析":
             _targeted_analysis(st, data, group_key)
@@ -2184,11 +2542,13 @@ def page_analysis():
         method_index, method_help = _choice("analysis.correlation_method", ["pearson", "spearman", "kendall"])
         method = st.selectbox("相关方法", ["pearson", "spearman", "kendall"], index=method_index, help=method_help)
         if st.button("构建相关网络", type="primary"):
-            result = _execute(st, terminal, "相关网络", lambda progress: (progress(0.1, "Computing correlation matrix"), _engine(st).feature_correlation_network(method=method, min_abs_correlation=threshold, top_features=top_features), progress(0.92, "Building network"))[1], "analysis")
+            result = _execute(st, terminal, "相关网络", lambda progress: (progress(0.1, "Computing correlation matrix"), _engine(data).feature_correlation_network(method=method, min_abs_correlation=threshold, top_features=top_features), progress(0.92, "Building network"))[1], "analysis",
+                              on_success=lambda result: st.session_state.update(network=result, result_table=result[1]))
             if result is not None: st.session_state.network = result; st.session_state.result_table = result[1]; st.rerun()
         _network_plot(st, data)
         _heatmap_ui(st, data, "correlation")
         _association_ui(st, data)
+        _correlation_distribution_ui(st, data)
     with supervised_tab:
         label_options = data.obs.columns.astype(str).tolist()
         label_index, label_help = _choice("supervised.label", label_options)
@@ -2230,22 +2590,24 @@ def page_analysis():
                 result = analyzer.evaluate(model, cv=cv, test_size=test_size, smote=smote, model_params=params, calibration_bins=calibration_bins)
                 if model in {"lda", "plsda"}:
                     key, columns = analyzer.store_latent_scores()
-                    progress(0.82, f"Writing obsm[{key!r}] and obs[{', '.join(columns)}]")
-                st.session_state.supervised = analyzer
+                    progress(0.82, "保存模型结果")
                 progress(0.92, "Generating QC, PR and calibration reports")
                 test_metrics = pd.DataFrame([result["test_metrics"]], index=["holdout"])
                 qc_metrics = pd.DataFrame([{key: value for key, value in result["model_qc"].items() if isinstance(value, (int, float))}], index=["model_qc"])
-                return pd.concat([test_metrics, qc_metrics, pd.DataFrame(result["classification_report"]).T])
-            result = _execute(st, terminal, "监督学习", train, "analysis")
-            if result is not None: st.session_state.result_table = result; st.rerun()
+                return analyzer, pd.concat([test_metrics, qc_metrics, pd.DataFrame(result["classification_report"]).T])
+            result = _execute(st, terminal, "监督学习", train, "analysis",
+                              on_success=lambda result: st.session_state.update(supervised=result[0], result_table=result[1]))
+            if result is not None: st.rerun()
         shap_default, shap_help = _parameter("supervised.shap_samples", 100)
         shap_samples = st.number_input("SHAP 最大样本数", 1, 1000, int(shap_default), help=shap_help)
         if st.button("计算 SHAP", disabled=st.session_state.supervised is None):
-            result = _execute(st, terminal, "SHAP", lambda progress: (progress(0.1, "Selecting background and samples"), st.session_state.supervised.explain_shap(max_samples=shap_samples), progress(0.92, "Aggregating SHAP values"))[1], "analysis")
-            if result is not None:
+            analyzer = st.session_state.supervised
+            def store_shap(result):
                 values = np.asarray(result.values)
                 values = np.mean(np.abs(values), axis=(0, 2)) if values.ndim == 3 else np.mean(np.abs(values), axis=0)
-                st.session_state.result_table = pd.DataFrame({"feature": st.session_state.supervised.feature_names, "mean_abs_shap": values}).sort_values("mean_abs_shap", ascending=False)
+                st.session_state.result_table = pd.DataFrame({"feature": analyzer.feature_names, "mean_abs_shap": values}).sort_values("mean_abs_shap", ascending=False)
+            result = _execute(st, terminal, "SHAP", lambda progress: (progress(0.1, "Selecting background and samples"), analyzer.explain_shap(max_samples=shap_samples), progress(0.92, "Aggregating SHAP values"))[1], "analysis", on_success=store_shap)
+            if result is not None:
                 st.rerun()
         analyzer = st.session_state.supervised
         if analyzer is not None and hasattr(analyzer, "model_"):
@@ -2254,7 +2616,9 @@ def page_analysis():
 
 
 def page_results():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     st.header("结果表、报告与导出")
     data = st.session_state.data
@@ -2267,7 +2631,7 @@ def page_results():
             f"当前后续分析使用 {int(data.cell_keep_mask().sum()):,} 个细胞 × "
             f"{int(data.feature_keep_mask().sum()):,} 个特征。"
         )
-    options = ["X", "obs", "var"]; index, help_text = _choice("results.table", options); table_name = st.radio("AnnData 表", options, index=index, horizontal=True, help=help_text)
+    options = ["X", "obs", "var"]; index, help_text = _choice("results.table", options); table_name = st.radio("数据表", options, index=index, horizontal=True, help=help_text, format_func=lambda key: {"X": "强度矩阵", "obs": "细胞信息", "var": "特征信息"}[key])
     if table_name == "X":
         configured, enhanced_help = _parameter("results.enhanced_table", True); enhanced = st.checkbox("显示并冻结 obs 列和 var 行", value=bool(configured), help=enhanced_help)
         if enhanced:
@@ -2287,19 +2651,28 @@ def page_results():
     else:
         st.info("尚无统计或模型结果。")
     st.subheader("导出完整数据")
+    _h5ad_save_controls(st, data)
     a, b = st.columns(2)
     if a.button("生成 H5AD 下载文件", use_container_width=True):
-        with st.spinner("正在生成完整 H5AD…"):
-            payload = _h5ad_bytes(data)
-        a.download_button("下载 H5AD", payload, "scmm_result.h5ad", "application/octet-stream", on_click="ignore", use_container_width=True)
+        _execute(st, _terminal(st), "生成 H5AD 下载文件", lambda progress: (
+            progress(.1, "写入完整 H5AD"), _h5ad_bytes(data))[1],
+            on_success=lambda result: st.session_state.update(h5ad_download=(id(data), result)))
+    h5ad_download = st.session_state.get("h5ad_download")
+    if h5ad_download and h5ad_download[0] == id(data):
+        a.download_button("下载已生成的 H5AD", h5ad_download[1], "scmm_result.h5ad", "application/octet-stream", on_click="ignore", use_container_width=True)
     if b.button("生成 CSV 下载包", use_container_width=True):
-        with st.spinner("正在生成完整 CSV 包…"):
-            payload = _csv_zip(data)
-        b.download_button("下载 X/obs/var CSV 包", payload, "scmm_tables.zip", "application/zip", on_click="ignore", use_container_width=True)
+        _execute(st, _terminal(st), "生成 CSV 下载包", lambda progress: (
+            progress(.1, "生成数据表格"), _csv_zip(data))[1],
+            on_success=lambda result: st.session_state.update(csv_download=(id(data), result)))
+    csv_download = st.session_state.get("csv_download")
+    if csv_download and csv_download[0] == id(data):
+        b.download_button("下载数据表格", csv_download[1], "scmm_tables.zip", "application/zip", on_click="ignore", use_container_width=True)
 
 
 def page_terminal():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     st.header("任务进度与运行报告")
     terminal = _terminal(st)
@@ -2319,10 +2692,14 @@ def page_annotation():
 
 
 def render_app():
-    import streamlit as st
+    import streamlit as streamlit
+    from scMM.i18n import localize
+    st = localize(streamlit)
 
     st.set_page_config(page_title="SCMM CyESI Workbench", page_icon="🧬", layout="wide")
     _state(st)
+    from scMM.i18n import language_selector
+    language_selector(streamlit)
     pages = [
         st.Page(page_data, title="数据导入与峰提取", icon="📥", default=True),
         st.Page(page_preview, title="TIC / EIC / 质谱预览", icon="📈"),
@@ -2331,13 +2708,29 @@ def render_app():
         st.Page(page_analysis, title="统计与监督学习", icon="🧪"),
         st.Page(page_annotation, title="物质注释", icon="🔎"),
         st.Page(page_results, title="结果与导出", icon="📦"),
-        st.Page(page_terminal, title="任务终端", icon="🖥️"),
+        st.Page(page_terminal, title="运行记录", icon="🖥️"),
     ]
     navigation = st.navigation(pages, position="sidebar", expanded=True)
     st.sidebar.markdown("**SCMM CyESI Workbench**")
+    if st.session_state.get("background_job") is not None:
+        st.header("任务正在运行")
+        st.caption("任务正在进行。可在左侧选择接下来查看的页面。")
+
+        @st.fragment(run_every=.5)
+        def monitor_job():
+            terminal = _terminal(st)
+            _poll_background(st, terminal)
+            if st.session_state.get("background_job") is None:
+                st.rerun(scope="app")
+
+        monitor_job()
+        st.stop()
+    if st.session_state.tasks and st.session_state.tasks[-1]["status"] == "failed":
+        st.sidebar.error(st.session_state.tasks[-1]["message"])
     data = st.session_state.data
     if data is not None:
         _layer_selector(st, data)
+        _h5ad_save_controls(st, data, sidebar=True)
         st.sidebar.success(f"{data.n_obs:,} cells × {data.n_vars:,} features")
         if hasattr(data, "cell_keep_mask"):
             st.sidebar.caption(

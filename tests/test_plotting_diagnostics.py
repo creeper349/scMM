@@ -12,6 +12,32 @@ from scMM.plot.diagnostics import point_density, qc_distribution, spectrum_curve
 from scMM.plot.export import render_figure
 
 
+def test_gate_active_export_color_preserves_ignored_and_source_colors(monkeypatch):
+    frame = pd.DataFrame({"x": [0, 1, 2], "y": [1, 2, 3],
+                          "status": ["active", "ignored", "active"]})
+    figure = px.scatter(frame, x="x", y="y", color="status",
+                        color_discrete_map={"active": "#2563eb", "ignored": "#b8b8b8"})
+    figure.update_layout(meta={"scmm_plot": "cell_gate", "scmm_color_label": "status"})
+    captured = []
+    original = Figure.savefig
+
+    def record(self, *args, **kwargs):
+        captured.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", record)
+    from matplotlib.colors import to_rgba
+
+    for file_format in ["svg", "png"]:
+        render_figure(figure, file_format=file_format, active_color="#ef4444")
+        markers = {collection.get_label(): collection for collection in captured[-1].axes[0].collections}
+        np.testing.assert_allclose(markers["active"].get_facecolors()[0], to_rgba("#ef4444", .8))
+        np.testing.assert_allclose(markers["ignored"].get_facecolors()[0], to_rgba("#b8b8b8", .8))
+    assert figure.data[0].marker.color == "#2563eb"
+    render_figure(figure)
+    np.testing.assert_allclose(captured[-1].axes[0].collections[0].get_facecolors()[0], to_rgba("#2563eb", .8))
+
+
 def test_qc_shared_counts_and_horizontal_boxes_export(tmp_path, monkeypatch):
     metrics = pd.DataFrame({"source_file": ["control"] * 40 + ["treated"] * 40,
                             "intensity": np.r_[np.arange(40), np.arange(40) + 20]})

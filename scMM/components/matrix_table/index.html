@@ -45,7 +45,7 @@ function draw() {
  const row=Math.floor(firstRow/50)*50,col=Math.floor(firstCol/10)*10;
  const request=row+':'+col;
  const available=row===data.row&&col===data.col;
- status.textContent=`细胞 ${Math.min(firstRow+1,data.nrows)}–${Math.min(lastRow,data.nrows)} / ${data.nrows} · 特征 ${Math.min(firstCol+1,data.ncols)}–${Math.min(lastCol,data.ncols)} / ${data.ncols}`+(available?'':' · 加载中…');
+ status.textContent=`${data.labels.cells} ${Math.min(firstRow+1,data.nrows)}–${Math.min(lastRow,data.nrows)} / ${data.nrows} · ${data.labels.features} ${Math.min(firstCol+1,data.ncols)}–${Math.min(lastCol,data.ncols)} / ${data.ncols}`+(available?'':' · '+data.labels.loading);
  clearTimeout(timer);
  if(!available&&pending!==request)timer=setTimeout(()=>{pending=request;send('streamlit:setComponentValue',{value:{row,col},dataType:'json'});},100);
 }
