@@ -10,8 +10,6 @@ SCMM connects mass-spectral processing with cell-level analysis. It constructs a
 
 ![SCMM processing workflow](docs/images/workflow.png)
 
-*Processing workflow from the SCMM usage guide by 赵泊雅. Signal and detection thresholds are configurable in the application.*
-
 ## Download and start
 
 Download [SCMM-GUI-0.3.0-fix.zip](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix.zip) and extract the complete folder. The distribution contains Python source, configuration files, documentation, and Windows setup and launch scripts. Previous distributions are available in [release/](https://github.com/creeper349/scMM/tree/main/release).
@@ -22,8 +20,6 @@ Existing installations can use a matching patch directly in the original softwar
 
 - [Patch from 0.2.0](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix-patch-from-0.2.0.zip)
 - [Patch from 0.3.0](https://github.com/creeper349/scMM/raw/refs/heads/main/release/SCMM-GUI-0.3.0-fix-patch-from-0.3.0.zip)
-
-补丁完整解压到原软件目录，运行对应的 `apply_patch_*.cmd` 即可更新。步骤见[升级说明](UPGRADE_TO_0.3.0-fix.md)。
 
 ### Windows quick start
 
